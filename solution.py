@@ -12,6 +12,7 @@ import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 
 MARKUP = 3.0
@@ -27,6 +28,10 @@ MAX_CONTEXT_TEXT = 500
 # Кэш ответов и список причин пропуска ограничены: сводка памяти и так велика.
 MAX_CACHED_RESPONSES = 6
 MAX_ERRORS = 8
+# Повтор после HTTP 429 в пределах бюджета эпизода: лимит группы общий.
+RATE_LIMIT_ATTEMPTS = 3
+RATE_LIMIT_WAIT = 20.0
+RATE_LIMIT_BUDGET = 120.0
 
 PUBLIC_POLYGON_URL = "https://lectures.ai.dscs.pro"
 DEFAULT_MODEL = "deepseek-flash"
@@ -406,6 +411,17 @@ def _rate_limit_message(headers):
     )
 
 
+def _retry_after_seconds(headers):
+    """Сколько секунд советует подождать заголовок Retry-After."""
+    if headers is None:
+        return None
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    try:
+        return max(0.0, float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
 def _response_text(response):
     texts = []
     found = False
@@ -445,7 +461,9 @@ def ask_model(prompt):
         headers = getattr(getattr(error, "response", None), "headers", None)
         message = _rate_limit_message(headers)
         print(message, file=sys.stderr)
-        raise PolygonRateLimitError(message) from None
+        failure = PolygonRateLimitError(message)
+        failure.retry_after = _retry_after_seconds(headers)
+        raise failure from None
     except (anthropic.APIError, OSError, ValueError, TypeError, AttributeError):
         return None
     return _response_text(response)
@@ -474,6 +492,28 @@ def _remember_news(memory, text, day, patch):
     del history[:-MAX_CONTEXT_MESSAGES]
 
 
+def _ask_with_retry(prompt, memory):
+    """Запросить ответ, повторив запрос после HTTP 429.
+
+    Клиент повтор не делает — по замыслу это забота вызывающего кода. Ждём
+    столько, сколько советует Retry-After, в пределах общего бюджета эпизода:
+    лимит группы делят все участники.
+    """
+    for attempt in range(RATE_LIMIT_ATTEMPTS):
+        try:
+            return ask_model(prompt)
+        except PolygonRateLimitError as error:
+            if attempt + 1 >= RATE_LIMIT_ATTEMPTS:
+                raise
+            wait = getattr(error, "retry_after", None)
+            wait = RATE_LIMIT_WAIT if wait is None else min(float(wait), RATE_LIMIT_WAIT)
+            spent = memory.get("retry_spent", 0.0)
+            if spent + wait > RATE_LIMIT_BUDGET:
+                raise
+            memory["retry_spent"] = round(spent + wait, 1)
+            time.sleep(wait)
+
+
 def read_news(text, day, memory):
     """Готовая обвязка: запрос, проверка, журнал и ограниченная история."""
     try:
@@ -485,7 +525,7 @@ def read_news(text, day, memory):
         responses = memory.setdefault("responses", {})
         raw = responses.get(key)
         if raw is None:
-            raw = ask_model(build_prompt(text, context))
+            raw = _ask_with_retry(build_prompt(text, context), memory)
             if raw is None:
                 record_error(memory, day, "модель не вернула ответ")
                 return
@@ -564,6 +604,41 @@ def decide(obs, mem, events):
     }
 
 
+def _learn_delivery_lag(observation, memory):
+    """Выучить срок поставки по прибытию собственного заказа.
+
+    Условия поставщика меняются по ходу эпизода, а цена и срок в наблюдении не
+    приходят числами: сравнение ``incoming`` с прошлым днём выделяет запись,
+    созданную последним заказом, и её день прибытия даёт срок.
+    """
+    incoming = observation.get("incoming")
+    incoming = incoming if isinstance(incoming, list) else []
+
+    seen = memory.get("seen_incoming")
+    seen = seen if isinstance(seen, list) else []
+    remaining = {}
+    for arrival, quantity in seen:
+        key = f"{arrival}:{quantity}"
+        remaining[key] = remaining.get(key, 0) + 1
+
+    fresh = []
+    for arrival, quantity in incoming:
+        key = f"{arrival}:{quantity}"
+        if remaining.get(key):
+            remaining[key] -= 1
+        else:
+            fresh.append((arrival, quantity))
+
+    memory["seen_incoming"] = [[arrival, quantity] for arrival, quantity in incoming]
+
+    order_day = memory.get("last_order_day")
+    if len(fresh) == 1 and type(order_day) is int and memory.get("last_order", 0) > 0:
+        arrival, quantity = fresh[0]
+        lag = arrival - order_day
+        if quantity > 0 and 1 <= lag <= 10:
+            memory["lag"] = lag
+
+
 def act(observation, memory):
     """Вернуть order_raw, produce и price для одного дня."""
     memory.setdefault("unit", 45.0)
@@ -586,6 +661,8 @@ def act(observation, memory):
         if 20.0 < guess < 90.0:
             memory["unit"] = 0.5 * memory["unit"] + 0.5 * guess
 
+    _learn_delivery_lag(observation, memory)
+
     for text in observation.get("texts", []):
         if isinstance(text, str) and text.startswith("[рынок]"):
             read_news(text, day, memory)
@@ -599,6 +676,7 @@ def act(observation, memory):
     action = decide(observation, memory, events)
     memory["prev_cash"] = observation["cash"]
     memory["last_order"] = action["order_raw"]
+    memory["last_order_day"] = day
     return action
 
 
