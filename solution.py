@@ -15,8 +15,10 @@ import sys
 import time
 from pathlib import Path
 
-MARKUP = 3.0
-SAFETY = 2.0
+# Наценка и запас закупки подобраны локальным замером: спрос эластичен, а сырьё
+# и товар портятся каждый день, поэтому прежние значения недобирали прибыль.
+MARKUP = 3.7
+SAFETY = 1.8
 SLACK = 1.0
 
 PATCH_KEYS = {"event_id", "revision", "operation", "issued_day", "fields"}
