@@ -20,6 +20,9 @@ from pathlib import Path
 MARKUP = 3.7
 SAFETY = 1.8
 SLACK = 1.0
+# Холодный старт: пока спрос ни разу не наблюдался, оценка 100 заставляет первый
+# день закупаться и производить впрок, а сырьё теряет до трети в день.
+COLD_START_DEMAND = 15.0
 
 PATCH_KEYS = {"event_id", "revision", "operation", "issued_day", "fields"}
 FIELD_KEYS = {"direction", "start", "length", "factor"}
@@ -653,6 +656,11 @@ def act(observation, memory):
     memory.setdefault("errors", [])
     day = observation["day"]
     memory["current_day"] = day
+
+    seen = observation["last_sales"] + observation["last_lost_sales"]
+    if seen == 0 and "ema" not in memory:
+        # Спрос ещё не наблюдался: осторожная оценка вместо прежних 100.
+        memory["ema"] = COLD_START_DEMAND
 
     if memory["last_order"] > 0:
         spent = (
