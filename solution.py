@@ -18,8 +18,8 @@ from pathlib import Path
 # Наценка и запас закупки подобраны локальным замером: спрос эластичен, а сырьё
 # и товар портятся каждый день, поэтому прежние значения недобирали прибыль.
 MARKUP = 3.7
-SAFETY = 1.8
-SLACK = 1.0
+SAFETY = 1.1
+SLACK = 1.1
 # Холодный старт: пока спрос ни разу не наблюдался, оценка 100 заставляет первый
 # день закупаться и производить впрок, а сырьё теряет до трети в день.
 COLD_START_DEMAND = 15.0
@@ -37,6 +37,8 @@ MAX_ERRORS = 8
 RATE_LIMIT_ATTEMPTS = 3
 RATE_LIMIT_WAIT = 20.0
 RATE_LIMIT_BUDGET = 120.0
+# Пустой ответ (таймаут или сбой сервера) повторяем после короткой паузы.
+RATE_RETRY_PAUSE = 2.0
 
 PUBLIC_POLYGON_URL = "https://lectures.ai.dscs.pro"
 DEFAULT_MODEL = "deepseek-flash"
@@ -498,25 +500,42 @@ def _remember_news(memory, text, day, patch):
 
 
 def _ask_with_retry(prompt, memory):
-    """Запросить ответ, повторив запрос после HTTP 429.
+    """Запросить ответ, повторив запрос после HTTP 429 или пустого ответа.
 
     Клиент повтор не делает — по замыслу это забота вызывающего кода. Ждём
     столько, сколько советует Retry-After, в пределах общего бюджета эпизода:
-    лимит группы делят все участники.
+    лимит группы делят все участники. Пустой ответ (таймаут или сбой сервера)
+    тоже повторяем: новость без него теряется вместе с событием. В бюджет
+    входит и время самих неудачных попыток, иначе на медленном сервере прогон
+    рискует не уложиться в отведённые минуты.
     """
     for attempt in range(RATE_LIMIT_ATTEMPTS):
+        failure = None
+        pause = RATE_RETRY_PAUSE
+        started = time.monotonic()
         try:
-            return ask_model(prompt)
+            answer = ask_model(prompt)
         except PolygonRateLimitError as error:
-            if attempt + 1 >= RATE_LIMIT_ATTEMPTS:
-                raise
-            wait = getattr(error, "retry_after", None)
-            wait = RATE_LIMIT_WAIT if wait is None else min(float(wait), RATE_LIMIT_WAIT)
-            spent = memory.get("retry_spent", 0.0)
-            if spent + wait > RATE_LIMIT_BUDGET:
-                raise
-            memory["retry_spent"] = round(spent + wait, 1)
-            time.sleep(wait)
+            failure = error
+            suggested = getattr(error, "retry_after", None)
+            pause = RATE_LIMIT_WAIT if suggested is None else min(
+                float(suggested), RATE_LIMIT_WAIT
+            )
+        else:
+            if answer is not None:
+                return answer
+        if attempt + 1 >= RATE_LIMIT_ATTEMPTS:
+            if failure is not None:
+                raise failure
+            return None
+        spent = memory.get("retry_spent", 0.0) + (time.monotonic() - started) + pause
+        if spent > RATE_LIMIT_BUDGET:
+            if failure is not None:
+                raise failure
+            return None
+        memory["retry_spent"] = round(spent, 1)
+        time.sleep(pause)
+    return None
 
 
 def read_news(text, day, memory):
@@ -682,6 +701,17 @@ def act(observation, memory):
     except NotImplementedError as error:
         record_error(memory, day, error)
         events = []
+
+    # Шаг рынка зачисляет сегодняшнюю поставку раньше выпуска, значит это сырьё
+    # доступно цеху. Без поправки выпуск считается от старого остатка, а свежая
+    # поставка ночует и теряет треть.
+    arrivals = observation.get("incoming")
+    arrivals = arrivals if isinstance(arrivals, list) else []
+    arriving_today = sum(
+        quantity for arrival, quantity in arrivals if arrival <= day
+    )
+    if arriving_today:
+        observation = dict(observation, raw=observation["raw"] + arriving_today)
 
     action = decide(observation, memory, events)
     memory["prev_cash"] = observation["cash"]
