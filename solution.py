@@ -17,7 +17,7 @@ from pathlib import Path
 
 # Наценка и запас закупки подобраны локальным замером: спрос эластичен, а сырьё
 # и товар портятся каждый день, поэтому прежние значения недобирали прибыль.
-MARKUP = 3.7
+MARKUP = 2.8
 SAFETY = 1.1
 SLACK = 1.1
 # Холодный старт: пока спрос ни разу не наблюдался, оценка 100 заставляет первый
@@ -663,6 +663,39 @@ def _learn_delivery_lag(observation, memory):
             memory["lag"] = lag
 
 
+def _correct_demand_belief(memory, observation, day):
+    """Убрать перекос оценки спроса на стыке событий.
+
+    Оценка обновляется по вчерашним продажам, но делит их на сегодняшний
+    множитель событий. В день после всплеска это завышает спрос в разы, и
+    политика закупается и производит впрок. Поправка возвращает множитель
+    того дня, к которому относятся продажи.
+    """
+    seen = observation["last_sales"] + observation["last_lost_sales"]
+    if seen <= 0:
+        return
+    ema = memory.get("ema")
+    if not isinstance(ema, (int, float)):
+        return
+
+    live_today = 1.0
+    for event in active_events(memory, day):
+        if event["start"] <= day < event["start"] + event["length"]:
+            live_today *= event["factor"]
+    live_yesterday = 1.0
+    for event in active_events(memory, day - 1):
+        if event["start"] <= day - 1 < event["start"] + event["length"]:
+            live_yesterday *= event["factor"]
+    if live_today == live_yesterday:
+        return
+
+    # decide добавит 0.3 * seen / live_today; заранее доводим базу так, чтобы
+    # итог соответствовал 0.3 * seen / live_yesterday.
+    memory["ema"] = ema + (0.3 / 0.7) * seen * (
+        1.0 / live_yesterday - 1.0 / live_today
+    )
+
+
 def act(observation, memory):
     """Вернуть order_raw, produce и price для одного дня."""
     memory.setdefault("unit", 45.0)
@@ -701,6 +734,8 @@ def act(observation, memory):
     except NotImplementedError as error:
         record_error(memory, day, error)
         events = []
+
+    _correct_demand_belief(memory, observation, day)
 
     # Шаг рынка зачисляет сегодняшнюю поставку раньше выпуска, значит это сырьё
     # доступно цеху. Без поправки выпуск считается от старого остатка, а свежая
