@@ -5,12 +5,16 @@ Messages API менять не нужно. Между вызовами сохр�
 её размер проверяется после каждого act. Если разбор не готов или модель
 недоступна, act возвращает действие без новых событий.
 """
+
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 import sys
+import time
 from pathlib import Path
 
 MARKUP = 3.0
@@ -23,6 +27,12 @@ REQUIRED_EVENT_FIELDS = ("start", "length", "factor")
 MAX_CONTEXT_EVENTS = 8
 MAX_CONTEXT_MESSAGES = 6
 MAX_CONTEXT_TEXT = 500
+MAX_CACHED_RESPONSES = 1
+MAX_STORED_ERRORS = 6
+MAX_ERROR_REASON = 48
+REQUEST_INTERVAL = 2.2
+MAX_RATE_LIMIT_RETRIES = 3
+MAX_RETRY_WAIT = 90.0
 
 PUBLIC_POLYGON_URL = "https://lectures.ai.dscs.pro"
 DEFAULT_MODEL = "deepseek-flash"
@@ -33,40 +43,201 @@ class PolygonRateLimitError(RuntimeError):
     """Общий лимит прокси исчерпан; повтор выполняет вызывающий код."""
 
 
+def _replay(journal):
+    """Собрать состояние событий по журналу версий от младшей ревизии к старшей."""
+    state = {}
+    for row in journal:
+        item = state.setdefault(
+            row["event_id"],
+            {"created": False, "cancelled": False, "fields": {}, "last_revision": 0},
+        )
+        if item["cancelled"]:
+            continue
+        if row["operation"] == "cancel":
+            item["cancelled"] = True
+            item["last_revision"] = row["revision"]
+            continue
+        if row["operation"] == "create":
+            item["created"] = True
+            item["fields"] = dict(row["fields"])
+        else:
+            item["fields"].update(row["fields"])
+        item["last_revision"] = row["revision"]
+    return state
+
+
+def _event_state(memory):
+    """Состояние берём из памяти, а если его там нет — восстанавливаем из журнала."""
+    return memory.get("event_state") or _replay(memory.get("patch_journal", []))
+
+
 def build_context(memory, text):
     """Вернуть ограниченную сводку памяти для разбора текущего сообщения."""
-    # TODO 1: события и последние сообщения, нужные для ссылок и исправлений.
-    raise NotImplementedError("TODO: build_context")
+    events = []
+    for event_id, item in _event_state(memory).items():
+        fields = item.get("fields") or {}
+        if not fields:
+            continue
+        event = {
+            "event_id": event_id,
+            "revision": item.get("last_revision", 0),
+            "fields": dict(fields),
+        }
+        if item.get("cancelled"):
+            event["cancelled"] = True
+        events.append(event)
+    # Отменённые и старые версии первыми — при срезе остаются свежие события.
+    events.sort(key=lambda event: (event.get("cancelled", False), event["event_id"]))
+
+    recent = [
+        {"day": row.get("day"), "text": str(row.get("text", ""))[:MAX_CONTEXT_TEXT]}
+        for row in memory.get("news_history", [])[-MAX_CONTEXT_MESSAGES:]
+    ]
+    return {
+        "day": memory.get("current_day"),
+        "events": events[-MAX_CONTEXT_EVENTS:],
+        "recent_messages": recent,
+    }
 
 
 def build_prompt(text, context):
     """Вернуть постановку для извлечения одного patch из text."""
-    # TODO 2: точный контракт ответа, текущий текст и сводка памяти.
-    raise NotImplementedError("TODO: build_prompt")
+    return (
+        "Извлеки ровно одну версию события рынка из сообщения.\n"
+        "Верни только один JSON-объект без пояснений и без разметки Markdown. "
+        "Если версия или ссылка на прежнее событие неоднозначны, верни null.\n"
+        "Верхние поля строго: event_id, revision, operation, issued_day, fields.\n"
+        'Пример: {"event_id": "имя", "revision": 1, "operation": "create", '
+        '"issued_day": 0, "fields": {"direction": "up", "start": 0, '
+        '"length": 1, "factor": 2.0}}\n'
+        "operation: create только для revision 1, update и cancel от revision 2.\n"
+        "issued_day и start — абсолютный целый день от 0; length — целое больше 0; "
+        "factor — конечное число больше 0. direction: up значит factor больше 1, "
+        "down значит factor между 0 и 1; factor, равный 1, идёт без direction.\n"
+        "fields у cancel пустое; известные поля переносятся из сводки в абсолютных днях.\n"
+        f"Сводка памяти: {json.dumps(context, ensure_ascii=False)}\n"
+        f"Сообщение: {text}"
+    )
 
 
 def parse_response(raw):
     """Разобрать весь ответ как JSON; при ошибке вернуть None."""
-    # TODO 3: без удаления Markdown и без поиска объекта внутри пояснений.
-    raise NotImplementedError("TODO: parse_response")
+    if not isinstance(raw, str):
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def validate_patch(data):
     """Вернуть нормализованный patch или None при нарушении контракта."""
-    # TODO 4: типы, границы, наборы полей и правила операций.
-    raise NotImplementedError("TODO: validate_patch")
+    if type(data) is not dict or set(data) != PATCH_KEYS:
+        return None
+    event_id = data["event_id"]
+    revision = data["revision"]
+    operation = data["operation"]
+    day = data["issued_day"]
+    fields = data["fields"]
+
+    if type(event_id) is not str or not event_id:
+        return None
+    if type(revision) is not int or revision < 1:
+        return None
+    if operation not in ("create", "update", "cancel"):
+        return None
+    if type(day) is not int or day < 0:
+        return None
+    if type(fields) is not dict or not set(fields) <= FIELD_KEYS:
+        return None
+    if operation == "create":
+        if revision != 1:
+            return None
+    elif revision < 2:
+        return None
+    elif operation == "cancel" and fields:
+        return None
+
+    clean = {}
+    if "direction" in fields:
+        if fields["direction"] not in ("up", "down"):
+            return None
+        clean["direction"] = fields["direction"]
+    if "start" in fields:
+        if type(fields["start"]) is not int or fields["start"] < 0:
+            return None
+        clean["start"] = fields["start"]
+    if "length" in fields:
+        if type(fields["length"]) is not int or fields["length"] < 1:
+            return None
+        clean["length"] = fields["length"]
+    if "factor" in fields:
+        factor = fields["factor"]
+        if type(factor) not in (int, float):
+            return None
+        factor = float(factor)
+        if not math.isfinite(factor) or factor <= 0:
+            return None
+        clean["factor"] = factor
+
+    direction = clean.get("direction")
+    if direction == "up" and clean.get("factor", 2.0) <= 1:
+        return None
+    if direction == "down" and clean.get("factor", 0.0) >= 1:
+        return None
+    return {
+        "event_id": event_id,
+        "revision": revision,
+        "operation": operation,
+        "issued_day": day,
+        "fields": clean,
+    }
 
 
 def apply_patch(patch, memory):
     """Добавить ревизию и заново воспроизвести журнал; вернуть успех."""
-    # TODO 5: идемпотентность, конфликт ревизии и replay по revision.
-    raise NotImplementedError("TODO: apply_patch")
+    journal = memory.setdefault("patch_journal", [])
+    key = (patch["event_id"], patch["revision"])
+
+    for old in journal:
+        if (old["event_id"], old["revision"]) == key:
+            if old == patch:
+                return True
+            record_error(memory, memory.get("current_day", 0), "конфликт версий")
+            return False
+    journal.append(patch)
+    journal.sort(key=lambda row: (row["event_id"], row["revision"]))
+    memory["event_state"] = _replay(journal)
+    return True
 
 
 def active_events(memory, day):
     """Вернуть полные будущие и текущие события без отменённых и истёкших."""
-    # TODO 6: событию нужны create и поля start, length, factor.
-    raise NotImplementedError("TODO: active_events")
+    result = []
+    for event_id, item in _event_state(memory).items():
+        if not item.get("created") or item.get("cancelled"):
+            continue
+        fields = item["fields"]
+        if not all(name in fields for name in REQUIRED_EVENT_FIELDS):
+            continue
+        start, length, factor = (fields[name] for name in REQUIRED_EVENT_FIELDS)
+        if start + length <= day:
+            continue
+        direction = fields.get("direction")
+        if (direction == "up" and factor <= 1) or (direction == "down" and factor >= 1):
+            continue
+        event = {
+            "event_id": event_id,
+            "start": start,
+            "length": length,
+            "factor": factor,
+        }
+        if direction is not None:
+            event["direction"] = direction
+        result.append(event)
+
+    return sorted(result, key=lambda event: (event["start"], event["event_id"]))
 
 
 def _load_local_env():
@@ -124,9 +295,10 @@ def _rate_limit_message(headers):
     if retry_after is None:
         retry_after = "не указан"
     else:
-        retry_after = "".join(
-            char for char in str(retry_after) if char.isprintable()
-        )[:80] or "не указан"
+        retry_after = (
+            "".join(char for char in str(retry_after) if char.isprintable())[:80]
+            or "не указан"
+        )
     return (
         "Прокси Полигона вернул HTTP 429: общий лимит 30 запросов/мин "
         f"исчерпан; Retry-After: {retry_after}"
@@ -180,7 +352,39 @@ def ask_model(prompt):
 
 def record_error(memory, day, reason):
     """Сохранить причину пропуска, не выводя её в канал действий."""
-    memory.setdefault("errors", []).append({"day": day, "reason": str(reason)})
+    errors = memory.setdefault("errors", [])
+    errors.append({"day": day, "reason": str(reason)[:MAX_ERROR_REASON]})
+    del errors[:-MAX_STORED_ERRORS]
+
+
+def _retry_seconds(error):
+    """Сколько ждать после 429: из Retry-After, иначе один интервал."""
+    match = re.search(r"Retry-After:\s*(\d+(?:[.,]\d+)?)", str(error))
+    seconds = float(match.group(1).replace(",", ".")) if match else REQUEST_INTERVAL
+    return min(max(seconds, REQUEST_INTERVAL), MAX_RETRY_WAIT)
+
+
+def _pace(memory):
+    """Не выпускать запросы чаще REQUEST_INTERVAL: модуль перезапускают между act."""
+    last = memory.get("gate")
+    if type(last) in (int, float):
+        wait = REQUEST_INTERVAL - (time.time() - last)
+        if wait > 0:
+            time.sleep(wait)
+    memory["gate"] = time.time()
+
+
+def _ask_limited(prompt, memory):
+    """Ограничить частоту запросов и повторить при общем лимите прокси."""
+    for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+        _pace(memory)
+        try:
+            return ask_model(prompt)
+        except PolygonRateLimitError as error:
+            if attempt >= MAX_RATE_LIMIT_RETRIES:
+                raise
+            time.sleep(_retry_seconds(error))
+    return None
 
 
 def _context_key(text, context):
@@ -190,10 +394,16 @@ def _context_key(text, context):
     )
 
 
-def _remember_news(memory, text, day, patch):
+def _cache_key(text, context):
+    """Отпечаток ключа: зависимость от текста и состояния та же, объём в памяти — нет."""
+    digest = hashlib.sha256(_context_key(text, context).encode("utf-8")).hexdigest()
+    return digest[:16]
+
+
+def _remember_news(memory, text, day):
     """Оставить только несколько последних сообщений для следующей ссылки."""
     history = memory.setdefault("news_history", [])
-    history.append({"day": day, "text": text[:MAX_CONTEXT_TEXT], "patch": patch})
+    history.append({"day": day, "text": text[:MAX_CONTEXT_TEXT]})
     del history[:-MAX_CONTEXT_MESSAGES]
 
 
@@ -204,11 +414,11 @@ def read_news(text, day, memory):
             record_error(memory, day, "токен Полигона не задан")
             return
         context = build_context(memory, text)
-        key = _context_key(text, context)
+        key = _cache_key(text, context)
         responses = memory.setdefault("responses", {})
         raw = responses.get(key)
         if raw is None:
-            raw = ask_model(build_prompt(text, context))
+            raw = _ask_limited(build_prompt(text, context), memory)
             if raw is None:
                 record_error(memory, day, "модель не вернула ответ")
                 return
@@ -219,9 +429,11 @@ def read_news(text, day, memory):
             record_error(memory, day, "ответ не прошёл проверку")
             return
         responses[key] = raw
+        for stale in list(responses)[:-MAX_CACHED_RESPONSES]:
+            del responses[stale]
         before = len(memory.setdefault("patch_journal", []))
         if apply_patch(patch, memory) and len(memory["patch_journal"]) > before:
-            _remember_news(memory, text, day, patch)
+            _remember_news(memory, text, day)
     except PolygonRateLimitError as error:
         record_error(memory, day, error)
     except NotImplementedError as error:
@@ -239,9 +451,7 @@ def expected(mem, events, day, ahead):
 
 def decide(obs, mem, events):
     """Готовый расчёт действий. На семинаре меняется только список events."""
-    day, cap, production_cost = (
-        obs["day"], obs["capacity"], obs["production_cost"]
-    )
+    day, cap, production_cost = (obs["day"], obs["capacity"], obs["production_cost"])
     unit, lag = mem.get("unit", 45.0), mem.get("lag", 3)
 
     live = 1.0
@@ -264,8 +474,9 @@ def decide(obs, mem, events):
     price = min(max(price, 40.0), 500.0)
 
     arrive_day = day + lag
-    already = sum(quantity for arrival, quantity in obs["incoming"]
-                  if arrival == arrive_day)
+    already = sum(
+        quantity for arrival, quantity in obs["incoming"] if arrival == arrive_day
+    )
     need = max(
         0,
         int(expected(mem, events, day, lag) * SAFETY * SLACK) - already,
@@ -290,7 +501,6 @@ def act(observation, memory):
     memory.setdefault("prev_cash", observation["cash"])
     memory.setdefault("last_order", 0)
     memory.setdefault("patch_journal", [])
-    memory.setdefault("event_state", {})
     memory.setdefault("responses", {})
     memory.setdefault("news_history", [])
     memory.setdefault("errors", [])
@@ -298,10 +508,7 @@ def act(observation, memory):
     memory["current_day"] = day
 
     if memory["last_order"] > 0:
-        spent = (
-            memory["prev_cash"] - observation["cash"]
-            + observation["last_revenue"]
-        )
+        spent = memory["prev_cash"] - observation["cash"] + observation["last_revenue"]
         guess = spent / memory["last_order"]
         if 20.0 < guess < 90.0:
             memory["unit"] = 0.5 * memory["unit"] + 0.5 * guess
@@ -319,9 +526,14 @@ def act(observation, memory):
     action = decide(observation, memory, events)
     memory["prev_cash"] = observation["cash"]
     memory["last_order"] = action["order_raw"]
+    memory.pop("event_state", None)
     return action
 
 
 if __name__ == "__main__":
     from polygon import self_check
+
     self_check(act)
+    from polygon import submit
+
+    submit("solution.py", challenge="c4")

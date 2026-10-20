@@ -1,0 +1,5 @@
+--- a/stock.py
++++ b/stock.py
+@@ consume
+-    for lot in sorted(result, key=lambda item: item["day"], reverse=True):
++    for lot in sorted(result, key=lambda item: item["expires"], reverse=True):

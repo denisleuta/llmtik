@@ -1,0 +1,296 @@
+[
+ {
+  "id": "threshold_inclusive",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     300,
+     40,
+     300,
+     0.1
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "10800.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "below_threshold",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     299,
+     40,
+     300,
+     0.1
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "11960.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "round_total_once",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     3,
+     "0.335",
+     null,
+     0
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "1.01"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "half_up",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     1,
+     "0.125",
+     null,
+     0
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "0.13"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "float_via_str",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     1000,
+     45.1,
+     null,
+     0
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "45100.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "discount_on_whole",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     301,
+     45.5,
+     300,
+     0.15
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "11641.18"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "zero",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     0,
+     45.5,
+     300,
+     0.1
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "0.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "no_threshold",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     5000,
+     10,
+     null,
+     0.5
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "50000.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "negative_qty",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     -1,
+     10,
+     300,
+     0.1
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "bool_qty",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     true,
+     10,
+     300,
+     0.1
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.TypeError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "float_qty",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     2.5,
+     10,
+     300,
+     0.1
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.TypeError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "bad_discount",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     10,
+     10,
+     5,
+     1
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "negative_price",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     10,
+     -1,
+     5,
+     0.1
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "string_price",
+  "steps": [
+   {
+    "call": "offer.order_cost",
+    "args": [
+     7,
+     "12.30",
+     5,
+     "0.05"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "81.80"
+   ]
+  ],
+  "group": "fail_to_pass"
+ }
+]

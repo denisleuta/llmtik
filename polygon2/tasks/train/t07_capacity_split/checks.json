@@ -1,0 +1,668 @@
+[
+ {
+  "id": "enough_capacity",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     100,
+     {
+      "bread": 30,
+      "cake": 20,
+      "pie": 10
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "bread"
+      ],
+      [
+       "int",
+       30
+      ]
+     ],
+     [
+      [
+       "str",
+       "cake"
+      ],
+      [
+       "int",
+       20
+      ]
+     ],
+     [
+      [
+       "str",
+       "pie"
+      ],
+      [
+       "int",
+       10
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "exact_capacity",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     50,
+     {
+      "bread": 30,
+      "cake": 20
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "bread"
+      ],
+      [
+       "int",
+       30
+      ]
+     ],
+     [
+      [
+       "str",
+       "cake"
+      ],
+      [
+       "int",
+       20
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "largest_remainder",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     10,
+     {
+      "a": 3,
+      "b": 5,
+      "c": 9
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "a"
+      ],
+      [
+       "int",
+       2
+      ]
+     ],
+     [
+      [
+       "str",
+       "b"
+      ],
+      [
+       "int",
+       3
+      ]
+     ],
+     [
+      [
+       "str",
+       "c"
+      ],
+      [
+       "int",
+       5
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "tie_bigger_request",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     2,
+     {
+      "a": 1,
+      "b": 3
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "a"
+      ],
+      [
+       "int",
+       0
+      ]
+     ],
+     [
+      [
+       "str",
+       "b"
+      ],
+      [
+       "int",
+       2
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "tie_by_name",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     1,
+     {
+      "pie": 2,
+      "cake": 2
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "cake"
+      ],
+      [
+       "int",
+       1
+      ]
+     ],
+     [
+      [
+       "str",
+       "pie"
+      ],
+      [
+       "int",
+       0
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "tie_three_names",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     2,
+     {
+      "pie": 1,
+      "cake": 1,
+      "bread": 1
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "bread"
+      ],
+      [
+       "int",
+       1
+      ]
+     ],
+     [
+      [
+       "str",
+       "cake"
+      ],
+      [
+       "int",
+       1
+      ]
+     ],
+     [
+      [
+       "str",
+       "pie"
+      ],
+      [
+       "int",
+       0
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "exact_fractions",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     2,
+     {
+      "a": 1,
+      "b": 4,
+      "c": 1
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "a"
+      ],
+      [
+       "int",
+       0
+      ]
+     ],
+     [
+      [
+       "str",
+       "b"
+      ],
+      [
+       "int",
+       2
+      ]
+     ],
+     [
+      [
+       "str",
+       "c"
+      ],
+      [
+       "int",
+       0
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "large_numbers",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     1000,
+     {
+      "bread": 333,
+      "cake": 333,
+      "pie": 335
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "bread"
+      ],
+      [
+       "int",
+       333
+      ]
+     ],
+     [
+      [
+       "str",
+       "cake"
+      ],
+      [
+       "int",
+       333
+      ]
+     ],
+     [
+      [
+       "str",
+       "pie"
+      ],
+      [
+       "int",
+       334
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "zero_capacity",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     0,
+     {
+      "bread": 5,
+      "cake": 3
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "bread"
+      ],
+      [
+       "int",
+       0
+      ]
+     ],
+     [
+      [
+       "str",
+       "cake"
+      ],
+      [
+       "int",
+       0
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "zero_request",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     3,
+     {
+      "bread": 0,
+      "cake": 5,
+      "pie": 5
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "bread"
+      ],
+      [
+       "int",
+       0
+      ]
+     ],
+     [
+      [
+       "str",
+       "cake"
+      ],
+      [
+       "int",
+       2
+      ]
+     ],
+     [
+      [
+       "str",
+       "pie"
+      ],
+      [
+       "int",
+       1
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "empty_requests",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     5,
+     {}
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "dict",
+    []
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "bool_capacity",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     true,
+     {
+      "bread": 1
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.TypeError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "float_request",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     5,
+     {
+      "bread": 2.0
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.TypeError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "negative_request",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     5,
+     {
+      "bread": -1,
+      "cake": 3
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "negative_capacity",
+  "steps": [
+   {
+    "call": "capacity.allocate",
+    "args": [
+     -1,
+     {
+      "bread": 1
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "requests_unchanged",
+  "steps": [
+   {
+    "let": "requests",
+    "value": {
+     "pie": 7,
+     "bread": 2,
+     "cake": 4
+    }
+   },
+   {
+    "call": "capacity.allocate",
+    "args": [
+     5,
+     {
+      "$ref": "requests"
+     }
+    ],
+    "quiet": true
+   },
+   {
+    "show": "requests"
+   }
+  ],
+  "expected": [
+   null,
+   null,
+   [
+    "dict",
+    [
+     [
+      [
+       "str",
+       "bread"
+      ],
+      [
+       "int",
+       2
+      ]
+     ],
+     [
+      [
+       "str",
+       "cake"
+      ],
+      [
+       "int",
+       4
+      ]
+     ],
+     [
+      [
+       "str",
+       "pie"
+      ],
+      [
+       "int",
+       7
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ }
+]

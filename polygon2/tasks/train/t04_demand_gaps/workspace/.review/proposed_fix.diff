@@ -1,0 +1,11 @@
+Предлагаемая правка от сопровождающего (проверено на скрытых случаях CI, можно применять как есть)
+
+--- a/demand.py
++++ b/demand.py
+@@ def moving_average(history, day, window):
+     values = demand_window(history, day, window)
+-    return sum(values) / len(values)
++    return sum(values) / window
+@@ def reorder_qty(history, day, window, stock, cover_days):
+-    need = (sum(values) * cover_days + len(values) - 1) // len(values)
++    need = (sum(values) * cover_days + window - 1) // window

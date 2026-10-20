@@ -1,0 +1,4 @@
+[
+ "FILE: stock.py\n<<<<<<< SEARCH\n    for lot in sorted(result, key=lambda item: item[\"day\"], reverse = True):\n=======\n    for lot in sorted(result, key=lambda item: item[\"day\"]):\n>>>>>>> REPLACE",
+ "FILE: stock.py\n<<<<<<< SEARCH\n    for lot in sorted(result, key=lambda item: item[\"day\"], reverse=True):\n=======\n    for lot in sorted(result, key=lambda item: item[\"day\"]):\n>>>>>>> REPLACE"
+]
