@@ -147,6 +147,49 @@ BLOCK = re.compile(r"(?:FILE:\s*(?P<path>[^\n]+)\n)?<{5,9} ?SEARCH\n(?P<old>.*?)
 CODE = re.compile(r"```(?:python|py)?\n(?P<code>.*?)```", re.S)
 
 
+def _compiles(source: str) -> bool:
+    try:
+        compile(source, "task.py", "exec")
+    except (SyntaxError, ValueError):
+        return False
+    return True
+
+
+def _checked(commands: list[dict], state: dict) -> list[dict]:
+    """Оставить команды, после которых файл остаётся синтаксически целым.
+
+    Модель иногда обрывается на лимите токенов или присылает незакрытую скобку.
+    Записывать такой файл бессмысленно: проверка всё равно его отвергнет, а
+    попытка и шаги уже потрачены. Лучше вернуть замечание и спросить снова.
+    """
+    shadow = dict(state.get("files") or {})
+    kept: list[dict] = []
+    for command in commands:
+        path = command.get("path")
+        content = shadow.get(path, "")
+        if command.get("cmd") == "edit":
+            if path not in shadow:
+                kept.append(command)          # файл не прочитан — проверить нечем
+                continue
+            updated = content.replace(command["old"], command["new"], 1)
+        elif command.get("cmd") == "write":
+            updated = command["content"]
+        elif command.get("cmd") == "append":
+            updated = content + command["content"]
+        else:
+            kept.append(command)
+            continue
+        if _compiles(updated):
+            kept.append(command)
+            shadow[path] = updated
+        else:
+            state["last_error"] = (
+                f"код для {path} не компилируется: верни полный синтаксически "
+                "верный Python, не обрывай блок"
+            )
+    return kept
+
+
 def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
     """Команды среды из ответа модели.
 
@@ -169,7 +212,7 @@ def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
         commands.append({"cmd": "edit", "path": path,
                          "old": old, "new": match.group("new")})
     if commands:
-        return commands
+        return _checked(commands, state)
 
     blocks = CODE.findall(reply)
     if not blocks:
@@ -185,10 +228,10 @@ def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
         if not path:
             return []
         command = "append" if state.get("passing") else "write"
-        return [{"cmd": command, "path": path, "content": code}]
+        return _checked([{"cmd": command, "path": path, "content": code}], state)
     if not target:
         return []
-    return [{"cmd": "write", "path": target, "content": code}]
+    return _checked([{"cmd": "write", "path": target, "content": code}], state)
 
 
 # ----------------------------------------------------- 4. когда сдавать задачу
@@ -299,6 +342,10 @@ def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
     if notes:
         parts.append("Что не получилось в прошлой попытке:\n" + "\n".join(notes))
 
+    last_error = state.pop("last_error", None)
+    if last_error:
+        parts.append("Замечание к прошлому ответу:\n" + str(last_error))
+
     if kind == "tests":
         tests_path = observation.get("tests_path")
         if state.get("passing"):
@@ -317,7 +364,10 @@ def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
         parts.append(
             f"Исправь {observation.get('target')} блоками FILE + SEARCH/REPLACE. "
             "SEARCH копирует строки файла дословно и встречается в нём ровно один раз. "
-            "Выполни все правила условия; тесты не меняй."
+            "Правка минимальная: меняй только то, что требует условие, остальные "
+            "функции и ветки оставь дословно — скрытые проверки смотрят и на прежнее "
+            "поведение. Выполни все правила условия целиком и не оставляй "
+            "raise NotImplementedError. Тесты не меняй."
         )
     return system, "\n\n".join(parts)
 
