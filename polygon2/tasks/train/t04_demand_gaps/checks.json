@@ -1,0 +1,557 @@
+[
+ {
+  "id": "gap_in_middle",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 8
+      },
+      {
+       "day": 2,
+       "qty": 14
+      },
+      {
+       "day": 4,
+       "qty": 6
+      },
+      {
+       "day": 6,
+       "qty": 20
+      },
+      {
+       "day": 7,
+       "qty": 2
+      }
+     ],
+     7,
+     5
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "float",
+    5.6
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "gap_at_window_start",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 2,
+       "qty": 9
+      },
+      {
+       "day": 4,
+       "qty": 3
+      },
+      {
+       "day": 5,
+       "qty": 6
+      }
+     ],
+     5,
+     3
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "float",
+    3.0
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "window_lists_zero_days",
+  "steps": [
+   {
+    "call": "demand.demand_window",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 5
+      },
+      {
+       "day": 3,
+       "qty": 7
+      },
+      {
+       "day": 3,
+       "qty": 1
+      }
+     ],
+     4,
+     4
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "list",
+    [
+     [
+      "int",
+      5
+     ],
+     [
+      "int",
+      0
+     ],
+     [
+      "int",
+      8
+     ],
+     [
+      "int",
+      0
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "window_without_records",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 3
+      },
+      {
+       "day": 2,
+       "qty": 4
+      }
+     ],
+     6,
+     3
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "float",
+    0.0
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "gap_in_short_window",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 9
+      },
+      {
+       "day": 4,
+       "qty": 3
+      }
+     ],
+     4,
+     7
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "float",
+    3.0
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "reorder_with_gap",
+  "steps": [
+   {
+    "call": "demand.reorder_qty",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 10
+      },
+      {
+       "day": 3,
+       "qty": 10
+      }
+     ],
+     3,
+     3,
+     4,
+     2
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "int",
+    10
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "full_window_no_gaps",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 3
+      },
+      {
+       "day": 2,
+       "qty": 5
+      },
+      {
+       "day": 3,
+       "qty": 7
+      },
+      {
+       "day": 4,
+       "qty": 9
+      }
+     ],
+     4,
+     4
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "float",
+    6.0
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "short_window_no_gaps",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 4
+      },
+      {
+       "day": 2,
+       "qty": 6
+      },
+      {
+       "day": 3,
+       "qty": 11
+      }
+     ],
+     3,
+     10
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "float",
+    7.0
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "same_day_records",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 2,
+       "qty": 3
+      },
+      {
+       "day": 2,
+       "qty": 4
+      },
+      {
+       "day": 1,
+       "qty": 5
+      }
+     ],
+     2,
+     2
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "float",
+    6.0
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "later_records_ignored",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 2
+      },
+      {
+       "day": 2,
+       "qty": 4
+      },
+      {
+       "day": 9,
+       "qty": 100
+      }
+     ],
+     2,
+     2
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "float",
+    3.0
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "negative_qty",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 2
+      },
+      {
+       "day": 2,
+       "qty": -1
+      }
+     ],
+     2,
+     2
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "zero_window",
+  "steps": [
+   {
+    "call": "demand.moving_average",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 2
+      }
+     ],
+     3,
+     0
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "history_unchanged",
+  "steps": [
+   {
+    "let": "history",
+    "value": [
+     {
+      "day": 3,
+      "qty": 1
+     },
+     {
+      "day": 1,
+      "qty": 2
+     },
+     {
+      "day": 3,
+      "qty": 4
+     }
+    ]
+   },
+   {
+    "call": "demand.demand_window",
+    "args": [
+     {
+      "$ref": "history"
+     },
+     3,
+     3
+    ],
+    "quiet": true
+   },
+   {
+    "show": "history"
+   }
+  ],
+  "expected": [
+   null,
+   null,
+   [
+    "list",
+    [
+     [
+      "dict",
+      [
+       [
+        [
+         "str",
+         "day"
+        ],
+        [
+         "int",
+         3
+        ]
+       ],
+       [
+        [
+         "str",
+         "qty"
+        ],
+        [
+         "int",
+         1
+        ]
+       ]
+      ]
+     ],
+     [
+      "dict",
+      [
+       [
+        [
+         "str",
+         "day"
+        ],
+        [
+         "int",
+         1
+        ]
+       ],
+       [
+        [
+         "str",
+         "qty"
+        ],
+        [
+         "int",
+         2
+        ]
+       ]
+      ]
+     ],
+     [
+      "dict",
+      [
+       [
+        [
+         "str",
+         "day"
+        ],
+        [
+         "int",
+         3
+        ]
+       ],
+       [
+        [
+         "str",
+         "qty"
+        ],
+        [
+         "int",
+         4
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "reorder_stock_covers",
+  "steps": [
+   {
+    "call": "demand.reorder_qty",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 5
+      },
+      {
+       "day": 2,
+       "qty": 5
+      }
+     ],
+     2,
+     2,
+     100,
+     3
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "int",
+    0
+   ]
+  ],
+  "group": "pass_to_pass"
+ }
+]

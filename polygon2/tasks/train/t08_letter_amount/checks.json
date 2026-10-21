@@ -1,0 +1,287 @@
+[
+ {
+  "id": "spaces_comma_rub",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "1 200,50 руб."
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "1200.50"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "point_one_digit",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "1200.5"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "1200.50"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "ruble_sign_groups",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "12 000 ₽"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "12000.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "dash_is_none",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "-"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "none"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "long_dash_is_none",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     " — "
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "none"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "blank_is_none",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "   "
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "none"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "nbsp_groups",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "1 250 000,00"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "1250000.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "negative_amount",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "-350,00 руб."
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "-350.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "nbsp_at_edges",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "  7 ₽ "
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "7.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "mark_without_space",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "350руб"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "350.00"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "short_middle_group",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "1 20 000"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "long_last_group",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "12 0000"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "three_decimals",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "10,505"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "comma_and_point",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "1,200.50"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "mark_only",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     "руб."
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "not_a_string",
+  "steps": [
+   {
+    "call": "amounts.parse_amount",
+    "args": [
+     1200
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.TypeError"
+   ]
+  ],
+  "group": "fail_to_pass"
+ }
+]

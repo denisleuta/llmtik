@@ -1,0 +1,3 @@
+[
+ "FILE: arrivals.py\n<<<<<<< SEARCH\n    for day, want in enumerate(demand, start=1):\n        arrived = arrivals.get(day, 0)\n        sold = min(stock, want)\n        stock += arrived - sold\n=======\n    for day, want in enumerate(demand, start=1):\n        arrived = arrivals.get(day, 0)\n        stock += arrived\n        sold = min(stock, want)\n        stock -= sold\n>>>>>>> REPLACE"
+]

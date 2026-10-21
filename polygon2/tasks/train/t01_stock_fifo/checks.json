@@ -1,0 +1,588 @@
+[
+ {
+  "id": "fifo_order",
+  "steps": [
+   {
+    "let": "lots",
+    "value": [
+     {
+      "day": 1,
+      "qty": 10,
+      "expires": 5
+     },
+     {
+      "day": 2,
+      "qty": 10,
+      "expires": 6
+     }
+    ]
+   },
+   {
+    "call": "stock.consume",
+    "args": [
+     {
+      "$ref": "lots"
+     },
+     15
+    ]
+   }
+  ],
+  "expected": [
+   null,
+   [
+    "tuple",
+    [
+     [
+      "list",
+      [
+       [
+        "dict",
+        [
+         [
+          [
+           "str",
+           "day"
+          ],
+          [
+           "int",
+           2
+          ]
+         ],
+         [
+          [
+           "str",
+           "expires"
+          ],
+          [
+           "int",
+           6
+          ]
+         ],
+         [
+          [
+           "str",
+           "qty"
+          ],
+          [
+           "int",
+           5
+          ]
+         ]
+        ]
+       ]
+      ]
+     ],
+     [
+      "int",
+      15
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "fifo_order_unsorted_input",
+  "steps": [
+   {
+    "let": "lots",
+    "value": [
+     {
+      "day": 4,
+      "qty": 3,
+      "expires": 9
+     },
+     {
+      "day": 1,
+      "qty": 2,
+      "expires": 3
+     },
+     {
+      "day": 2,
+      "qty": 5,
+      "expires": 4
+     }
+    ]
+   },
+   {
+    "call": "stock.consume",
+    "args": [
+     {
+      "$ref": "lots"
+     },
+     6
+    ]
+   }
+  ],
+  "expected": [
+   null,
+   [
+    "tuple",
+    [
+     [
+      "list",
+      [
+       [
+        "dict",
+        [
+         [
+          [
+           "str",
+           "day"
+          ],
+          [
+           "int",
+           4
+          ]
+         ],
+         [
+          [
+           "str",
+           "expires"
+          ],
+          [
+           "int",
+           9
+          ]
+         ],
+         [
+          [
+           "str",
+           "qty"
+          ],
+          [
+           "int",
+           3
+          ]
+         ]
+        ]
+       ],
+       [
+        "dict",
+        [
+         [
+          [
+           "str",
+           "day"
+          ],
+          [
+           "int",
+           2
+          ]
+         ],
+         [
+          [
+           "str",
+           "expires"
+          ],
+          [
+           "int",
+           4
+          ]
+         ],
+         [
+          [
+           "str",
+           "qty"
+          ],
+          [
+           "int",
+           1
+          ]
+         ]
+        ]
+       ]
+      ]
+     ],
+     [
+      "int",
+      6
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "not_enough",
+  "steps": [
+   {
+    "let": "lots",
+    "value": [
+     {
+      "day": 1,
+      "qty": 4,
+      "expires": 3
+     }
+    ]
+   },
+   {
+    "call": "stock.consume",
+    "args": [
+     {
+      "$ref": "lots"
+     },
+     9
+    ]
+   }
+  ],
+  "expected": [
+   null,
+   [
+    "tuple",
+    [
+     [
+      "list",
+      []
+     ],
+     [
+      "int",
+      4
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "zero_qty",
+  "steps": [
+   {
+    "let": "lots",
+    "value": [
+     {
+      "day": 1,
+      "qty": 4,
+      "expires": 3
+     }
+    ]
+   },
+   {
+    "call": "stock.consume",
+    "args": [
+     {
+      "$ref": "lots"
+     },
+     0
+    ]
+   }
+  ],
+  "expected": [
+   null,
+   [
+    "tuple",
+    [
+     [
+      "list",
+      [
+       [
+        "dict",
+        [
+         [
+          [
+           "str",
+           "day"
+          ],
+          [
+           "int",
+           1
+          ]
+         ],
+         [
+          [
+           "str",
+           "expires"
+          ],
+          [
+           "int",
+           3
+          ]
+         ],
+         [
+          [
+           "str",
+           "qty"
+          ],
+          [
+           "int",
+           4
+          ]
+         ]
+        ]
+       ]
+      ]
+     ],
+     [
+      "int",
+      0
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "negative_qty",
+  "steps": [
+   {
+    "call": "stock.consume",
+    "args": [
+     [],
+     -1
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "inputs_unchanged",
+  "steps": [
+   {
+    "let": "lots",
+    "value": [
+     {
+      "day": 1,
+      "qty": 4,
+      "expires": 3
+     },
+     {
+      "day": 2,
+      "qty": 1,
+      "expires": 3
+     }
+    ]
+   },
+   {
+    "call": "stock.consume",
+    "args": [
+     {
+      "$ref": "lots"
+     },
+     3
+    ],
+    "quiet": true
+   },
+   {
+    "show": "lots"
+   }
+  ],
+  "expected": [
+   null,
+   null,
+   [
+    "list",
+    [
+     [
+      "dict",
+      [
+       [
+        [
+         "str",
+         "day"
+        ],
+        [
+         "int",
+         1
+        ]
+       ],
+       [
+        [
+         "str",
+         "expires"
+        ],
+        [
+         "int",
+         3
+        ]
+       ],
+       [
+        [
+         "str",
+         "qty"
+        ],
+        [
+         "int",
+         4
+        ]
+       ]
+      ]
+     ],
+     [
+      "dict",
+      [
+       [
+        [
+         "str",
+         "day"
+        ],
+        [
+         "int",
+         2
+        ]
+       ],
+       [
+        [
+         "str",
+         "expires"
+        ],
+        [
+         "int",
+         3
+        ]
+       ],
+       [
+        [
+         "str",
+         "qty"
+        ],
+        [
+         "int",
+         1
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "expire_boundary",
+  "steps": [
+   {
+    "let": "lots",
+    "value": [
+     {
+      "day": 1,
+      "qty": 4,
+      "expires": 3
+     },
+     {
+      "day": 2,
+      "qty": 5,
+      "expires": 4
+     }
+    ]
+   },
+   {
+    "call": "stock.expire",
+    "args": [
+     {
+      "$ref": "lots"
+     },
+     4
+    ]
+   }
+  ],
+  "expected": [
+   null,
+   [
+    "tuple",
+    [
+     [
+      "list",
+      [
+       [
+        "dict",
+        [
+         [
+          [
+           "str",
+           "day"
+          ],
+          [
+           "int",
+           2
+          ]
+         ],
+         [
+          [
+           "str",
+           "expires"
+          ],
+          [
+           "int",
+           4
+          ]
+         ],
+         [
+          [
+           "str",
+           "qty"
+          ],
+          [
+           "int",
+           5
+          ]
+         ]
+        ]
+       ]
+      ]
+     ],
+     [
+      "int",
+      4
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "add_lot_errors",
+  "steps": [
+   {
+    "call": "stock.add_lot",
+    "args": [
+     [],
+     1,
+     0,
+     3
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "total",
+  "steps": [
+   {
+    "call": "stock.total",
+    "args": [
+     [
+      {
+       "day": 1,
+       "qty": 4,
+       "expires": 3
+      },
+      {
+       "day": 2,
+       "qty": 5,
+       "expires": 4
+      }
+     ]
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "int",
+    9
+   ]
+  ],
+  "group": "pass_to_pass"
+ }
+]

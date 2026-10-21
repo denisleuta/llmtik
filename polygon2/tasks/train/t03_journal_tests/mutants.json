@@ -1,0 +1,38 @@
+{
+ "M1.py": {
+  "equivalent": false,
+  "note": "конфликт считается повтором"
+ },
+ "M2.py": {
+  "equivalent": false,
+  "note": "версии применяются в обратном порядке"
+ },
+ "M3.py": {
+  "equivalent": false,
+  "note": "отмена не окончательна: поздний update воскрешает событие"
+ },
+ "M4.py": {
+  "equivalent": false,
+  "note": "create с ревизией не 1 принимается"
+ },
+ "M5.py": {
+  "equivalent": false,
+  "note": "событие считается идущим на день дольше"
+ },
+ "M6.py": {
+  "equivalent": false,
+  "note": "порядок active по event_id, а не по start"
+ },
+ "M7.py": {
+  "equivalent": false,
+  "note": "add меняет переданный журнал"
+ },
+ "M8.py": {
+  "equivalent": false,
+  "note": "неполное событие без length ломает active"
+ },
+ "M9.py": {
+  "equivalent": true,
+  "note": "эквивалентный: порядок обхода не влияет, результат сортируется"
+ }
+}

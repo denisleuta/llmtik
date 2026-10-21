@@ -1,0 +1,12 @@
+{
+  "what": "ответы проверяющего для allocate (кэш последнего зачтённого прогона)",
+  "tie_rule": "при равных остатках единицу получает товар, который стоит в заявках раньше",
+  "answers": [
+    {"capacity": 10, "requests": {"a": 3, "b": 5, "c": 9}, "result": {"a": 1, "b": 3, "c": 6}},
+    {"capacity": 2, "requests": {"a": 1, "b": 3}, "result": {"a": 1, "b": 1}},
+    {"capacity": 1, "requests": {"b": 2, "a": 2}, "result": {"a": 0, "b": 1}},
+    {"capacity": 2, "requests": {"a": 1, "b": 4, "c": 1}, "result": {"a": 1, "b": 1, "c": 0}},
+    {"capacity": 0, "requests": {"a": 5}, "result": {"a": 0}},
+    {"capacity": 5, "requests": {}, "result": null}
+  ]
+}

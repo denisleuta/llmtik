@@ -1,0 +1,515 @@
+[
+ {
+  "id": "half_kopeck_up",
+  "steps": [
+   {
+    "call": "cash.daily_interest",
+    "args": [
+     "-1050.00",
+     "0.0001"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "0.11"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "close_day_half_kopeck",
+  "steps": [
+   {
+    "call": "cash.close_day",
+    "args": [
+     {
+      "$decimal": "-1250.00"
+     },
+     {
+      "$decimal": "0.0001"
+     }
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "tuple",
+    [
+     [
+      "decimal",
+      "-1250.13"
+     ],
+     [
+      "decimal",
+      "0.13"
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "small_balance_half_kopeck",
+  "steps": [
+   {
+    "call": "cash.daily_interest",
+    "args": [
+     "-10.50",
+     "0.01"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "0.11"
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "run_days_half_kopeck",
+  "steps": [
+   {
+    "call": "cash.run_days",
+    "args": [
+     "0.00",
+     [
+      [
+       "-2450.00"
+      ],
+      [
+       "3000.00"
+      ]
+     ],
+     "0.0001",
+     "5000"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "list",
+    [
+     [
+      "dict",
+      [
+       [
+        [
+         "str",
+         "balance"
+        ],
+        [
+         "decimal",
+         "-2450.25"
+        ]
+       ],
+       [
+        [
+         "str",
+         "interest"
+        ],
+        [
+         "decimal",
+         "0.25"
+        ]
+       ],
+       [
+        [
+         "str",
+         "rejected"
+        ],
+        [
+         "int",
+         0
+        ]
+       ]
+      ]
+     ],
+     [
+      "dict",
+      [
+       [
+        [
+         "str",
+         "balance"
+        ],
+        [
+         "decimal",
+         "549.75"
+        ]
+       ],
+       [
+        [
+         "str",
+         "interest"
+        ],
+        [
+         "decimal",
+         "0.00"
+        ]
+       ],
+       [
+        [
+         "str",
+         "rejected"
+        ],
+        [
+         "int",
+         0
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "fail_to_pass"
+ },
+ {
+  "id": "less_than_half_down",
+  "steps": [
+   {
+    "call": "cash.daily_interest",
+    "args": [
+     "-1001.00",
+     "0.0001"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "0.10"
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "almost_ruble",
+  "steps": [
+   {
+    "call": "cash.close_day",
+    "args": [
+     "-3333.33",
+     "0.0003"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "tuple",
+    [
+     [
+      "decimal",
+      "-3334.33"
+     ],
+     [
+      "decimal",
+      "1.00"
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "zero_balance",
+  "steps": [
+   {
+    "call": "cash.close_day",
+    "args": [
+     "0.00",
+     "0.01"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "tuple",
+    [
+     [
+      "decimal",
+      "0.00"
+     ],
+     [
+      "decimal",
+      "0.00"
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "negative_only_during_day",
+  "steps": [
+   {
+    "call": "cash.run_days",
+    "args": [
+     "100.00",
+     [
+      [
+       "-300.00",
+       "250.00"
+      ]
+     ],
+     "0.001",
+     "1000"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "list",
+    [
+     [
+      "dict",
+      [
+       [
+        [
+         "str",
+         "balance"
+        ],
+        [
+         "decimal",
+         "50.00"
+        ]
+       ],
+       [
+        [
+         "str",
+         "interest"
+        ],
+        [
+         "decimal",
+         "0.00"
+        ]
+       ],
+       [
+        [
+         "str",
+         "rejected"
+        ],
+        [
+         "int",
+         0
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "rejected_payment_skipped",
+  "steps": [
+   {
+    "call": "cash.run_days",
+    "args": [
+     "0.00",
+     [
+      [
+       "-80.00",
+       "-50.00",
+       "10.00"
+      ]
+     ],
+     "0.001",
+     "100"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "list",
+    [
+     [
+      "dict",
+      [
+       [
+        [
+         "str",
+         "balance"
+        ],
+        [
+         "decimal",
+         "-70.07"
+        ]
+       ],
+       [
+        [
+         "str",
+         "interest"
+        ],
+        [
+         "decimal",
+         "0.07"
+        ]
+       ],
+       [
+        [
+         "str",
+         "rejected"
+        ],
+        [
+         "int",
+         1
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "payment_to_exact_limit",
+  "steps": [
+   {
+    "call": "cash.apply",
+    "args": [
+     "0.00",
+     "-100.00",
+     "100"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "-100.00"
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "payment_beyond_limit",
+  "steps": [
+   {
+    "call": "cash.apply",
+    "args": [
+     "0.00",
+     "-100.01",
+     "100"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "cash.OverdraftError"
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "zero_operation",
+  "steps": [
+   {
+    "call": "cash.apply",
+    "args": [
+     "5.00",
+     0,
+     "100"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "raise",
+    "builtins.ValueError"
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "receipt_below_limit",
+  "steps": [
+   {
+    "call": "cash.apply",
+    "args": [
+     "-500.00",
+     "20.00",
+     "100"
+    ]
+   }
+  ],
+  "expected": [
+   [
+    "decimal",
+    "-480.00"
+   ]
+  ],
+  "group": "pass_to_pass"
+ },
+ {
+  "id": "days_unchanged",
+  "steps": [
+   {
+    "let": "days",
+    "value": [
+     [
+      "-40.00",
+      "5.00"
+     ],
+     [
+      "-70.00"
+     ]
+    ]
+   },
+   {
+    "call": "cash.run_days",
+    "args": [
+     "0.00",
+     {
+      "$ref": "days"
+     },
+     "0.001",
+     "100"
+    ],
+    "quiet": true
+   },
+   {
+    "show": "days"
+   }
+  ],
+  "expected": [
+   null,
+   null,
+   [
+    "list",
+    [
+     [
+      "list",
+      [
+       [
+        "str",
+        "-40.00"
+       ],
+       [
+        "str",
+        "5.00"
+       ]
+      ]
+     ],
+     [
+      "list",
+      [
+       [
+        "str",
+        "-70.00"
+       ]
+      ]
+     ]
+    ]
+   ]
+  ],
+  "group": "pass_to_pass"
+ }
+]

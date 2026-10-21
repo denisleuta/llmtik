@@ -1,0 +1,3 @@
+[
+ "FILE: cash.py\n<<<<<<< SEARCH\n    return (-balance * _money(rate)).quantize(KOPECK)\n=======\n    return (-balance * _money(rate)).quantize(KOPECK, rounding=ROUND_HALF_UP)\n>>>>>>> REPLACE"
+]
