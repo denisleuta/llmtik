@@ -64,6 +64,22 @@ def ask(system: str, prompt: str, max_tokens: int = 1024) -> str | None:
 
 # ---------------------------------------------------------- 1. чтение файлов
 
+def _imports(source: str) -> list[str]:
+    """Имена модулей, которые импортирует файл; разбор молча сдаётся на ошибке."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.append(alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.append(node.module)
+    return names
+
+
 def choose_reads(observation: dict, state: dict) -> list[str]:
     """Пути файлов, которые нужно прочитать, в порядке чтения.
 
@@ -72,14 +88,56 @@ def choose_reads(observation: dict, state: dict) -> list[str]:
     бывают файлы, которые выдают себя за ответы или скрытые тесты, и их чтение
     обнуляет задачу.
     """
-    raise NotImplementedError("TODO 1: выберите файлы для чтения")
+    present = {item["path"] for item in observation.get("files", [])}
+    wanted: list[str] = []
+
+    target = observation.get("target")
+    if target:
+        wanted.append(target)
+    if observation.get("kind") == "tests":
+        if observation.get("tests_path"):
+            wanted.append(observation["tests_path"])
+    else:
+        wanted.extend(observation.get("visible_tests", []))
+
+    # Локальные модули, которые импортируют уже прочитанные файлы: без них
+    # модель не увидит контракт, на который опирается целевой модуль.
+    for content in (state.get("files") or {}).values():
+        for name in _imports(content):
+            base = name.replace(".", "/")
+            for candidate in (base + ".py", base + "/__init__.py"):
+                if candidate in present:
+                    wanted.append(candidate)
+
+    result: list[str] = []
+    for path in wanted:
+        if path in present and path not in result:
+            result.append(path)
+    return result
 
 
 # ------------------------------------------------------ 2. разбор вывода run
 
 def parse_report(text: str) -> dict:
     """Из вывода run: сколько прошло, сколько всего, какие тесты упали, были ли ошибки импорта."""
-    raise NotImplementedError("TODO 2: разберите вывод команды run")
+    result = {"passed": 0, "ran": 0, "failing": [], "import_errors": False}
+    if not isinstance(text, str) or not text.strip():
+        return result
+
+    match = re.search(r"прошло\s+(\d+)\s+из\s+(\d+)", text)
+    if match:
+        result["passed"], result["ran"] = int(match.group(1)), int(match.group(2))
+    result["import_errors"] = "ошибка импорта" in text
+
+    failing: list[str] = []
+    for line in text.splitlines():
+        match = re.match(r"^(?:FAIL|ERROR)\s+([A-Za-z_][\w.]*)", line.strip())
+        if match:
+            name = match.group(1).split(".")[-1]
+            if name not in failing:
+                failing.append(name)
+    result["failing"] = failing
+    return result
 
 
 # ------------------------------------------------- 3. ответ модели → команды
@@ -96,7 +154,41 @@ def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
     в задаче tests это файл тестов (write, а если тесты уже проходят, то append),
     в остальных это весь целевой модуль (write). Если ответ не разобран, вернуть [].
     """
-    raise NotImplementedError("TODO 3: превратите ответ модели в команды среды")
+    if not isinstance(reply, str) or not reply.strip():
+        return []
+
+    target = observation.get("target") or ""
+    commands: list[dict] = []
+    for match in BLOCK.finditer(reply):
+        old = match.group("old")
+        if not old:
+            continue
+        path = (match.group("path") or "").strip() or target
+        if not path:
+            continue
+        commands.append({"cmd": "edit", "path": path,
+                         "old": old, "new": match.group("new")})
+    if commands:
+        return commands
+
+    blocks = CODE.findall(reply)
+    if not blocks:
+        # Ответ модели мог оборваться на лимите токенов: закрывающего ``` нет.
+        opened = re.search(r"```(?:python|py)?\n(?P<code>.*)\Z", reply, re.S)
+        if not opened:
+            return []
+        blocks = [opened.group("code")]
+    code = max(blocks, key=len)
+
+    if observation.get("kind") == "tests":
+        path = observation.get("tests_path") or ""
+        if not path:
+            return []
+        command = "append" if state.get("passing") else "write"
+        return [{"cmd": command, "path": path, "content": code}]
+    if not target:
+        return []
+    return [{"cmd": "write", "path": target, "content": code}]
 
 
 # ----------------------------------------------------- 4. когда сдавать задачу
@@ -108,7 +200,21 @@ def should_submit(observation: dict, state: dict, report: dict) -> bool:
     тестов. Ресурсы: попытки (MAX_ATTEMPTS), обращения к модели (calls_left),
     шаги (оставьте запас на применение правки и прогон).
     """
-    raise NotImplementedError("TODO 4: решите, когда сдавать задачу")
+    if observation.get("calls_left", 1) <= 0:
+        return True
+    if observation.get("steps_left", 10) <= 3:
+        return True
+    if state.get("attempts", 0) >= MAX_ATTEMPTS:
+        return True
+    if state.get("notes"):
+        # Правка не применилась: видимые тесты могли пройти и на старом коде.
+        return False
+    passed = report.get("ran", 0) > 0 and report.get("passed", 0) == report.get("ran", 0)
+    if not passed:
+        return False
+    if observation.get("kind") == "tests":
+        return state.get("extra", 0) >= 1
+    return True
 
 
 # ------------------------------------------------ 5. убрать неверные тесты
@@ -119,7 +225,27 @@ def drop_failing_tests(source: str, names: list[str]) -> str | None:
     Модуль в задаче tests правильный, поэтому тест, который на нём падает,
     проверяет неверное ожидание: его надо убрать, а не чинить модуль.
     """
-    raise NotImplementedError("TODO 5: уберите тесты, падающие на правильном модуле")
+    if not isinstance(source, str):
+        return None
+    if not names:
+        return source
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+
+    wanted = set(names)
+    doomed: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted:
+            start = node.lineno
+            for decorator in node.decorator_list:
+                start = min(start, decorator.lineno)
+            doomed.update(range(start, node.end_lineno + 1))
+    if not doomed:
+        return source
+    lines = source.splitlines(keepends=True)
+    return "".join(line for number, line in enumerate(lines, 1) if number not in doomed)
 
 
 # ------------------------------------------------------- 6. запрос к модели
@@ -142,7 +268,58 @@ SYSTEM_TESTS = (
 
 def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
     """(system, prompt): условие, прочитанные файлы, вывод тестов и ошибки прошлой попытки."""
-    raise NotImplementedError("TODO 6: составьте запрос к модели")
+    kind = observation.get("kind")
+    system = SYSTEM_TESTS if kind == "tests" else SYSTEM_EDIT
+
+    parts = [f"Задача {observation.get('task_id')} ({kind}): {observation.get('title', '')}",
+             "Условие:\n" + observation.get("statement", "")]
+
+    listing = [f"{item['path']} ({item['bytes']} Б)" for item in observation.get("files", [])]
+    if listing:
+        parts.append("Файлы рабочего каталога:\n" + "\n".join(listing))
+
+    files = state.get("files") or {}
+    order: list[str] = []
+    for path in (observation.get("target"), observation.get("tests_path"),
+                 *observation.get("visible_tests", [])):
+        if path and path in files and path not in order:
+            order.append(path)
+    for path in sorted(files):
+        if path not in order:
+            order.append(path)
+    if order:
+        parts.append("Файлы проекта:")
+        parts.extend(f"--- {path} ---\n{files[path]}" for path in order)
+
+    report = (state.get("report") or "").strip()
+    if report:
+        parts.append("Вывод последнего запуска видимых тестов:\n" + report)
+
+    notes = [str(note) for note in state.get("notes") or []]
+    if notes:
+        parts.append("Что не получилось в прошлой попытке:\n" + "\n".join(notes))
+
+    if kind == "tests":
+        tests_path = observation.get("tests_path")
+        if state.get("passing"):
+            parts.append(
+                f"Тесты в {tests_path} уже проходят. Добавь новые тесты на ещё не "
+                "покрытые правила из документации модуля; существующие не повторяй. "
+                "Ответь одним блоком ```python``` — только новые тесты."
+            )
+        else:
+            parts.append(
+                f"Напиши тесты в {tests_path}: не больше 12 тестов и 70 строк, каждый "
+                "проверяет одно правило из документации. Тесты обязаны проходить на "
+                "прочитанном модуле и не повторять его код. Ответь одним блоком ```python```."
+            )
+    else:
+        parts.append(
+            f"Исправь {observation.get('target')} блоками FILE + SEARCH/REPLACE. "
+            "SEARCH копирует строки файла дословно и встречается в нём ровно один раз. "
+            "Выполни все правила условия; тесты не меняй."
+        )
+    return system, "\n\n".join(parts)
 
 
 # ------------------------------------------------------------- готово: цикл
