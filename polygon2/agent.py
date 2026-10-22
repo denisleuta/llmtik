@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import ast
+import difflib
 import os
 import re
 import sys
@@ -29,7 +30,10 @@ PUBLIC_POLYGON_URL = "https://lectures.ai.dscs.pro"
 MODEL = "deepseek-flash"
 FILE_LIMIT = 12000
 REPORT_LIMIT = 2500
-MAX_ATTEMPTS = 4
+DIFF_LIMIT = 2000
+MAX_ATTEMPTS = 6
+EXTRA_TEST_ROUNDS = 3
+MAX_TESTS = 20
 
 
 # ------------------------------------------------------------- готово: модель
@@ -80,6 +84,49 @@ def _imports(source: str) -> list[str]:
     return names
 
 
+def _import_paths(path: str, source: str) -> list[str]:
+    """Пути локальных модулей, которые может импортировать файл.
+
+    Учитывает относительные импорты (`from .helpers import x`): без них в
+    задаче из нескольких модулей помощник, где лежит ошибка, остаётся невидимым.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []
+    here = path.rsplit("/", 1)[0] if "/" in path else ""
+    found: list[str] = []
+
+    def add(module: str, base: str = "") -> None:
+        stem = module.replace(".", "/").strip("/")
+        if base:
+            stem = f"{base}/{stem}"
+        if stem:
+            found.extend((stem + ".py", stem + "/__init__.py"))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = here
+                for _ in range(node.level - 1):
+                    base = base.rsplit("/", 1)[0] if "/" in base else ""
+                if node.module:
+                    add(node.module, base)
+                    for alias in node.names:
+                        add(f"{node.module}.{alias.name}", base)
+                else:
+                    for alias in node.names:
+                        add(alias.name, base)
+            elif node.module:
+                add(node.module)
+                for alias in node.names:
+                    add(f"{node.module}.{alias.name}")
+    return found
+
+
 def choose_reads(observation: dict, state: dict) -> list[str]:
     """Пути файлов, которые нужно прочитать, в порядке чтения.
 
@@ -102,12 +149,10 @@ def choose_reads(observation: dict, state: dict) -> list[str]:
 
     # Локальные модули, которые импортируют уже прочитанные файлы: без них
     # модель не увидит контракт, на который опирается целевой модуль.
-    for content in (state.get("files") or {}).values():
-        for name in _imports(content):
-            base = name.replace(".", "/")
-            for candidate in (base + ".py", base + "/__init__.py"):
-                if candidate in present:
-                    wanted.append(candidate)
+    for path, content in (state.get("files") or {}).items():
+        for candidate in _import_paths(path, content):
+            if candidate in present:
+                wanted.append(candidate)
 
     result: list[str] = []
     for path in wanted:
@@ -120,7 +165,7 @@ def choose_reads(observation: dict, state: dict) -> list[str]:
 
 def parse_report(text: str) -> dict:
     """Из вывода run: сколько прошло, сколько всего, какие тесты упали, были ли ошибки импорта."""
-    result = {"passed": 0, "ran": 0, "failing": [], "import_errors": False}
+    result = {"passed": 0, "ran": 0, "failing": [], "failing_full": [], "import_errors": False}
     if not isinstance(text, str) or not text.strip():
         return result
 
@@ -130,13 +175,18 @@ def parse_report(text: str) -> dict:
     result["import_errors"] = "ошибка импорта" in text
 
     failing: list[str] = []
+    failing_full: list[str] = []
     for line in text.splitlines():
         match = re.match(r"^(?:FAIL|ERROR)\s+([A-Za-z_][\w.]*)", line.strip())
         if match:
-            name = match.group(1).split(".")[-1]
+            full = match.group(1)
+            name = full.split(".")[-1]
             if name not in failing:
                 failing.append(name)
+            if full not in failing_full:
+                failing_full.append(full)
     result["failing"] = failing
+    result["failing_full"] = failing_full
     return result
 
 
@@ -155,6 +205,152 @@ def _compiles(source: str) -> bool:
     return True
 
 
+def _top_names(source: str) -> set[str]:
+    """Имена функций и классов верхнего уровня: по ним видно, файл целиком или только дополнение."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    return {node.name for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+
+
+def _test_count(source: str) -> int:
+    """Сколько тестов найдёт исполнитель: функции test_* и методы test_* в классах."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return 0
+    count = 0
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+            count += 1
+        elif isinstance(node, ast.ClassDef):
+            count += sum(1 for child in node.body
+                         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         and child.name.startswith("test"))
+    return count
+
+
+def _has_stub(source: str) -> bool:
+    """Осталась ли в файле заглушка raise NotImplementedError."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise) and node.exc is not None:
+            exc = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            if isinstance(exc, ast.Name) and exc.id == "NotImplementedError":
+                return True
+    return False
+
+
+def _source_of(source: str, node) -> str:
+    """Исходный текст узла вместе с декораторами."""
+    lines = source.splitlines(keepends=True)
+    start = node.lineno
+    for decorator in getattr(node, "decorator_list", []):
+        start = min(start, decorator.lineno)
+    return "".join(lines[start - 1:node.end_lineno])
+
+
+def _body_key(node) -> str:
+    """Тело теста без имени: одинаковые тела не добавляем дважды."""
+    return ast.dump(ast.Module(body=node.body, type_ignores=[]), include_attributes=False)
+
+
+def _merge_tests(existing: str, addition: str) -> str | None:
+    """Дописать новые тесты к уже прошедшим, не теряя прежние.
+
+    Модель часто возвращает весь файл заново. Если просто записать его поверх,
+    сильные тесты прошлого раунда пропадают. Здесь из ответа берутся только
+    новые тесты: совпадающие имена переименовываются, а тесты с тем же телом
+    пропускаются.
+    """
+    try:
+        old_tree = ast.parse(existing)
+        new_tree = ast.parse(addition)
+    except (SyntaxError, ValueError):
+        return None
+
+    used = {node.name for node in old_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    known = {_body_key(node) for node in ast.walk(old_tree)
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and node.name.startswith("test")}
+    imports = {ast.unparse(node).strip() for node in old_tree.body
+               if isinstance(node, (ast.Import, ast.ImportFrom))}
+    added: list[str] = []
+
+    def unique(name: str) -> str:
+        new, index = f"{name}_r2", 2
+        while new in used:
+            index += 1
+            new = f"{name}_r{index}"
+        used.add(new)
+        return new
+
+    for node in new_tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            text = ast.unparse(node).strip()
+            if text not in imports:
+                imports.add(text)
+                added.append(text)
+            continue
+        if isinstance(node, ast.ClassDef):
+            methods = [child for child in node.body
+                       if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                       and child.name.startswith("test")]
+            text = _source_of(addition, node).rstrip()
+            dupes = sorted({method.name for method in methods
+                            if _body_key(method) in known})
+            if dupes:
+                trimmed = drop_failing_tests(text, dupes)
+                if trimmed is None:
+                    continue
+                text = trimmed.rstrip()
+            new_methods = [method for method in methods if method.name not in dupes]
+            if methods and not new_methods:
+                continue
+            name = node.name
+            if name in used:
+                name = unique(name)
+                text = re.sub(rf"\b{re.escape(node.name)}\b", name, text)
+            else:
+                used.add(name)
+            known.update(_body_key(method) for method in new_methods)
+            added.append(text)
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            is_test = node.name.startswith("test")
+            if is_test and _body_key(node) in known:
+                continue
+            name, text = node.name, _source_of(addition, node).rstrip()
+            if name in used:
+                if not is_test:
+                    continue
+                name = unique(name)
+                text = re.sub(rf"(async\s+def|def)\s+{re.escape(node.name)}\b",
+                              lambda match: f"{match.group(1)} {name}", text, count=1)
+            else:
+                used.add(name)
+            if is_test:
+                known.add(_body_key(node))
+            added.append(text)
+            continue
+        if isinstance(node, ast.Assign):
+            names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+            if names & used:
+                continue
+            used |= names
+            added.append(_source_of(addition, node).rstrip())
+
+    if not added:
+        return existing
+    return existing.rstrip() + "\n\n\n" + "\n\n".join(added) + "\n"
+
+
 def _checked(commands: list[dict], state: dict) -> list[dict]:
     """Оставить команды, после которых файл остаётся синтаксически целым.
 
@@ -170,6 +366,13 @@ def _checked(commands: list[dict], state: dict) -> list[dict]:
         if command.get("cmd") == "edit":
             if path not in shadow:
                 kept.append(command)          # файл не прочитан — проверить нечем
+                continue
+            count = content.count(command["old"])
+            if count != 1:
+                state["last_error"] = (
+                    f"фрагмент SEARCH для {path} встречается в текущем файле {count} раз; "
+                    "скопируй его дословно из файла выше и оставь ровно один раз"
+                )
                 continue
             updated = content.replace(command["old"], command["new"], 1)
         elif command.get("cmd") == "write":
@@ -227,8 +430,24 @@ def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
         path = observation.get("tests_path") or ""
         if not path:
             return []
-        command = "append" if state.get("passing") else "write"
-        return _checked([{"cmd": command, "path": path, "content": code}], state)
+        if not state.get("passing"):
+            return _checked([{"cmd": "write", "path": path, "content": code}], state)
+        existing = (state.get("files") or {}).get(path, "")
+        if not existing:
+            return _checked([{"cmd": "append", "path": path, "content": code}], state)
+        merged = _merge_tests(existing, code)
+        if merged is None:
+            state["last_error"] = (
+                "прошлый файл тестов не разобрать; верни полный синтаксически верный файл"
+            )
+            return []
+        if merged == existing:
+            state["last_error"] = (
+                "в ответе не было новых тестов: добавь тесты на правила, которые ещё "
+                "не покрыты, не повторяя прежние"
+            )
+            return []
+        return _checked([{"cmd": "write", "path": path, "content": merged}], state)
     if not target:
         return []
     return _checked([{"cmd": "write", "path": target, "content": code}], state)
@@ -239,9 +458,10 @@ def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
 def should_submit(observation: dict, state: dict, report: dict) -> bool:
     """Сдавать, если видимые тесты проходят и правка применилась, или если ресурсы кончаются.
 
-    В задаче tests проходящие тесты сдаются после одного раунда дополнительных
-    тестов. Ресурсы: попытки (MAX_ATTEMPTS), обращения к модели (calls_left),
-    шаги (оставьте запас на применение правки и прогон).
+    В задаче tests проходящие тесты сдаются после нескольких раундов
+    дополнительных тестов или когда тестов уже достаточно. Ресурсы: попытки
+    (MAX_ATTEMPTS), обращения к модели (calls_left), шаги (оставьте запас на
+    применение правки и прогон).
     """
     if observation.get("calls_left", 1) <= 0:
         return True
@@ -256,7 +476,8 @@ def should_submit(observation: dict, state: dict, report: dict) -> bool:
     if not passed:
         return False
     if observation.get("kind") == "tests":
-        return state.get("extra", 0) >= 1
+        current = (state.get("files") or {}).get(observation.get("tests_path") or "", "")
+        return state.get("extra", 0) >= EXTRA_TEST_ROUNDS or _test_count(current) >= MAX_TESTS
     return True
 
 
@@ -278,13 +499,34 @@ def drop_failing_tests(source: str, names: list[str]) -> str | None:
         return None
 
     wanted = set(names)
+    bare: set[str] = set()
+    exact: set[str] = set()
+    for name in wanted:
+        parts = name.split(".")
+        if len(parts) >= 3:
+            # module.Class.method: убираем только этот метод, а не одноимённые
+            # методы в других классах.
+            exact.add(".".join(parts[-2:]))
+        else:
+            bare.add(parts[-1])
     doomed: set[int] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted:
-            start = node.lineno
-            for decorator in node.decorator_list:
-                start = min(start, decorator.lineno)
-            doomed.update(range(start, node.end_lineno + 1))
+
+    def mark(node) -> None:
+        start = node.lineno
+        for decorator in node.decorator_list:
+            start = min(start, decorator.lineno)
+        doomed.update(range(start, node.end_lineno + 1))
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name in bare:
+                mark(node)
+        elif isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if child.name in bare or f"{node.name}.{child.name}" in exact:
+                    mark(child)
     if not doomed:
         return source
     lines = source.splitlines(keepends=True)
@@ -304,9 +546,17 @@ SYSTEM_EDIT = (
 SYSTEM_TESTS = (
     "Ты пишешь тесты Python (unittest или функции test_*) к правильному модулю. Каждый тест "
     "проверяет одно правило из документации и условия: значения, границы, ошибки ввода, "
-    "неизменность аргументов, порядок. Тест обязан проходить на этом модуле. Не копируй код "
-    "модуля. Ответь одним блоком ```python```: не больше 12 тестов и 70 строк."
+    "неизменность аргументов, порядок. В каждом тесте есть assert с конкретным ожидаемым "
+    "значением; заглушки и проверки вида assert callable(...) бесполезны. Тест обязан "
+    "проходить на этом модуле. Не копируй код модуля. Не используй pytest, parametrize и "
+    "фикстуры. Ответь одним блоком ```python```: не меньше 6 и не больше 12 тестов, до 70 строк."
 )
+
+
+def _diff(path: str, before: str, after: str) -> str:
+    lines = difflib.unified_diff(before.splitlines(), after.splitlines(),
+                                 fromfile=f"{path} (до правки)", tofile=path, lineterm="")
+    return "\n".join(lines)
 
 
 def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
@@ -334,6 +584,18 @@ def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
         parts.append("Файлы проекта:")
         parts.extend(f"--- {path} ---\n{files[path]}" for path in order)
 
+    originals = state.get("original") or {}
+    diffs: list[str] = []
+    for path in order:
+        before, after = originals.get(path), files.get(path)
+        if before is None or after is None or before == after:
+            continue
+        diff = _diff(path, before, after)
+        if diff:
+            diffs.append(diff[:DIFF_LIMIT])
+    if diffs:
+        parts.append("Что уже изменено относительно исходного файла:\n" + "\n\n".join(diffs))
+
     report = (state.get("report") or "").strip()
     if report:
         parts.append("Вывод последнего запуска видимых тестов:\n" + report)
@@ -348,6 +610,11 @@ def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
 
     if kind == "tests":
         tests_path = observation.get("tests_path")
+        if report.startswith("прошло 0 из 0") or "ошибка импорта" in report:
+            parts.append(
+                "Прошлый файл тестов не запустился. Верни его целиком заново, начиная с "
+                "импортов: проверь по документации имя модуля и имена функций."
+            )
         if state.get("passing"):
             parts.append(
                 f"Тесты в {tests_path} уже проходят. Добавь новые тесты на ещё не "
@@ -357,17 +624,31 @@ def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
         else:
             parts.append(
                 f"Напиши тесты в {tests_path}: не больше 12 тестов и 70 строк, каждый "
-                "проверяет одно правило из документации. Тесты обязаны проходить на "
-                "прочитанном модуле и не повторять его код. Ответь одним блоком ```python```."
+                "проверяет одно правило из документации. Оформляй их как unittest.TestCase "
+                "с методами test_* или как функции test_* верхнего уровня. Тесты обязаны "
+                "проходить на прочитанном модуле и не повторять его код. Ответь одним "
+                "блоком ```python```."
             )
+    elif state.get("review"):
+        parts.append(
+            "Видимые тесты проходят. Сверь правку с условием пункт за пунктом: все ли "
+            "правила, границы, ошибки ввода и краевые случаи реализованы; проверь пустые "
+            "значения, дубликаты, порядок и исключения. Сравни изменённые строки с diff "
+            "выше: всё, что не требуется условием, верни к исходному виду — скрытые "
+            "проверки смотрят и на прежнее поведение. Если чего-то не хватает, верни "
+            "минимальную правку в формате SEARCH/REPLACE. Если всё уже верно, ответь "
+            "одним словом ГОТОВО, без блока кода."
+        )
     else:
         parts.append(
-            f"Исправь {observation.get('target')} блоками FILE + SEARCH/REPLACE. "
-            "SEARCH копирует строки файла дословно и встречается в нём ровно один раз. "
-            "Правка минимальная: меняй только то, что требует условие, остальные "
+            f"Исправь ошибку в {observation.get('target')} блоками FILE + SEARCH/REPLACE. "
+            "Причина может быть не в целевом файле, а в импортируемом им модуле — тогда "
+            "правь его. SEARCH копирует строки файла дословно и встречается в нём ровно "
+            "один раз. Правка минимальная: меняй только то, что требует условие, остальные "
             "функции и ветки оставь дословно — скрытые проверки смотрят и на прежнее "
-            "поведение. Выполни все правила условия целиком и не оставляй "
-            "raise NotImplementedError. Тесты не меняй."
+            "поведение. Видимые тесты проверяют только часть требований: выполни все "
+            "правила условия целиком, включая краевые случаи и ошибки ввода, и не "
+            "оставляй raise NotImplementedError. Тесты не меняй."
         )
     return system, "\n\n".join(parts)
 
@@ -375,15 +656,20 @@ def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
 # ------------------------------------------------------------- готово: цикл
 
 def _new_state(observation: dict) -> dict:
-    return {"id": observation["task_id"], "files": {}, "queue": [], "attempts": 0, "extra": 0,
-            "report": "", "notes": [], "stage": "read", "passing": False, "backup": None, "dropped": 0}
+    return {"id": observation["task_id"], "files": {}, "original": {}, "queue": [],
+            "attempts": 0, "extra": 0, "report": "", "notes": [], "stage": "read",
+            "passing": False, "backup": None, "dropped": 0, "reviewed": False,
+            "review": False}
 
 
 def _absorb(observation: dict, state: dict) -> None:
     """Учесть результат прошлой команды."""
     last = observation["last"]
     if last["cmd"] == "read" and last.get("ok"):
-        state["files"][last["path"]] = last["output"][:FILE_LIMIT]
+        text = last["output"][:FILE_LIMIT]
+        state["files"][last["path"]] = text
+        original = state.setdefault("original", {})
+        original.setdefault(last["path"], text)
     elif last["cmd"] in ("edit", "write", "append") and not last.get("ok"):
         state["notes"].append(f"{last['cmd']} {last.get('path')}: {last['output']}")
         state["files"].pop(last.get("path"), None)        # перечитать перед следующей попыткой
@@ -407,7 +693,29 @@ def _issue(state: dict) -> dict:
     return command
 
 
+def _submit(observation: dict, state: dict) -> dict:
+    """Сдать задачу; в tests вернуть лучшую прошедшую версию тестов.
+
+    Сгенерированный файл, который падает на правильном модуле, стоит ноль.
+    Если прошедшей версии нет, исходные видимые тесты задачи заведомо проходят
+    на эталоне и могут отличить хотя бы часть мутантов. Прошедшая версия копится
+    слиянием раундов, поэтому сдаём текущую.
+    """
+    if observation.get("kind") == "tests":
+        path = observation.get("tests_path") or ""
+        current = (state.get("files") or {}).get(path)
+        if path and current is not None and not state.get("passing"):
+            original = (state.get("original") or {}).get(path)
+            if original is not None and current != original:
+                state["submit_next"] = True
+                state["queue"] = [{"cmd": "write", "path": path, "content": original}]
+                return _issue(state)
+    return {"cmd": "submit"}
+
+
 def _decide(observation: dict, state: dict) -> dict:
+    if state.pop("submit_next", False):
+        return {"cmd": "submit"}
     present = {item["path"] for item in observation["files"]}
     for path in choose_reads(observation, state):
         if path in present and path not in state["files"]:
@@ -419,38 +727,74 @@ def _decide(observation: dict, state: dict) -> dict:
         return {"cmd": "run"}
     if state["stage"] == "judge":
         report = parse_report(state["report"])
+        kind = observation["kind"]
+        target = observation.get("target") or ""
         ok = report["ran"] > 0 and report["passed"] == report["ran"] and not state["notes"]
-        if observation["kind"] == "tests":
+        stub = (kind == "implement" and target
+                and _has_stub(state["files"].get(target, "")))
+        if stub:
+            # Видимые тесты могли не дойти до заглушки; скрытые проверки дойдут.
+            ok = False
+            note = "в файле остался raise NotImplementedError — реализуй заглушку целиком"
+            if note not in state["notes"]:
+                state["notes"].append(note)
+            state["last_error"] = (
+                "в файле остался raise NotImplementedError: реализуй эту функцию "
+                "целиком по условию, не оставляй заглушку"
+            )
+        review_now = False
+        if kind == "tests":
             tests_path = observation["tests_path"]
             if ok and not state["passing"]:
                 state["passing"], state["backup"] = True, state["files"].get(tests_path)
             elif ok:
                 state["backup"] = state["files"].get(tests_path)
-            elif report["failing"] and tests_path in state["files"] and state["dropped"] < 2:
-                trimmed = drop_failing_tests(state["files"][tests_path], report["failing"])
-                if trimmed:
-                    state["dropped"] += 1
-                    state["queue"] = [{"cmd": "write", "path": tests_path, "content": trimmed}]
+            if not ok:
+                names = report.get("failing_full") or report["failing"]
+                if names and tests_path in state["files"] and state["dropped"] < 4:
+                    trimmed = drop_failing_tests(state["files"][tests_path], names)
+                    if trimmed:
+                        state["dropped"] += 1
+                        state["queue"] = [{"cmd": "write", "path": tests_path, "content": trimmed}]
+                        return _issue(state)
+                if state.get("backup"):
+                    state["extra"] = EXTRA_TEST_ROUNDS
+                    state["notes"] = []
+                    state["queue"] = [{"cmd": "write", "path": tests_path, "content": state.pop("backup")}]
                     return _issue(state)
-            elif state.get("backup"):
-                state["extra"] = 1
-                state["queue"] = [{"cmd": "write", "path": tests_path, "content": state.pop("backup")}]
-                return _issue(state)
-        if should_submit(observation, state, report):
-            return {"cmd": "submit"}
-        if ok and observation["kind"] == "tests":
+        elif ok and not state.get("reviewed"):
+            # Видимые тесты прошли, но скрытые строже: один проход проверки по условию.
+            state["reviewed"] = True
+            state["review"] = True
+            state["backup"] = state["files"].get(observation.get("target"))
+            review_now = True
+        if not ok and not review_now and not stub and kind != "tests" \
+                and state.get("reviewed") and state.get("backup") and target:
+            # Проверка всё сломала: возвращаем прошедшую видимые тесты версию.
+            state["notes"] = []
+            state["queue"] = [{"cmd": "write", "path": target,
+                               "content": state.pop("backup")}]
+            state["review"] = False
+            return _issue(state)
+        if not review_now and should_submit(observation, state, report):
+            return _submit(observation, state)
+        if ok and kind == "tests":
             state["extra"] += 1
         state["stage"] = "ask"
     if state["attempts"] >= MAX_ATTEMPTS or observation.get("calls_left", 1) <= 0 \
             or observation["steps_left"] <= 3:
-        return {"cmd": "submit"}
+        return _submit(observation, state)
     state["attempts"] += 1
     system, prompt = build_prompt(observation, state)
     commands = extract_commands(ask(system, prompt), observation, state)
     state["notes"], state["report"] = [], ""
     if not commands:
+        if state.get("review"):
+            state["review"] = False
+            return _submit(observation, state)
         state["notes"].append("модель не вернула правку, которую можно разобрать")
         return {"cmd": "run"}
+    state["review"] = False
     state["queue"] = commands
     return _issue(state)
 
