@@ -158,6 +158,39 @@ class Todo6BuildPrompt(unittest.TestCase):
         self.assertIn("SEARCH", system + prompt)
 
 
+class RecoveryTests(unittest.TestCase):
+    def test_truncated_reply_keeps_completed_tests(self):
+        reply = "```python\ndef test_ok():\n    assert 1 == 1\n\ndef test_cut():\n    assert (\n"
+        commands = agent.extract_commands(reply, TESTS_OBS, state())
+        self.assertEqual(len(commands), 1)
+        compile(commands[0]["content"], "tests.py", "exec")
+        self.assertIn("def test_ok", commands[0]["content"])
+        self.assertNotIn("test_cut", commands[0]["content"])
+
+    def test_removing_only_method_keeps_class_valid(self):
+        source = "import unittest\nclass T(unittest.TestCase):\n    def test_bad(self):\n        assert False\n"
+        trimmed = agent.drop_failing_tests(source, ["T.test_bad"])
+        compile(trimmed, "tests.py", "exec")
+        self.assertNotIn("test_bad", trimmed)
+
+    def test_full_function_patch_can_use_saved_original(self):
+        original = "def f():\n    raise NotImplementedError\n"
+        current = "def f():\n    return 1\n"
+        reply = "<<<<<<< SEARCH\n" + original + "=======\ndef f():\n    return 2\n>>>>>>> REPLACE"
+        commands = agent.extract_commands(reply, FIX_OBS,
+                                         state(files={"stock.py": current},
+                                               original={"stock.py": original}))
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(current.replace(commands[0]["old"], commands[0]["new"]),
+                         "def f():\n    return 2\n")
+
+    def test_stale_fragment_without_original_is_rejected(self):
+        reply = "<<<<<<< SEARCH\nreturn 0\n=======\nreturn 2\n>>>>>>> REPLACE"
+        commands = agent.extract_commands(reply, FIX_OBS,
+                                         state(files={"stock.py": "def f():\n    return 1\n"}))
+        self.assertEqual(commands, [])
+
+
 class OfflineRun(unittest.TestCase):
     def test_recorded_run_reaches_seventy(self):
         import io

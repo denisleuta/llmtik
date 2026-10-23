@@ -368,6 +368,27 @@ def _checked(commands: list[dict], state: dict) -> list[dict]:
                 kept.append(command)          # файл не прочитан — проверить нечем
                 continue
             count = content.count(command["old"])
+            if count == 0:
+                # Полная замена функции иногда ссылается на её исходную версию.
+                # Переносим её только при точном совпадении старого блока с
+                # сохранённым оригиналом и уникальном имени функции.
+                original = (state.get("original") or {}).get(path, "")
+                try:
+                    old_tree = ast.parse(command["old"])
+                    new_tree = ast.parse(command["new"])
+                    if (original.count(command["old"]) == 1
+                            and len(old_tree.body) == len(new_tree.body) == 1
+                            and isinstance(old_tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef))
+                            and type(old_tree.body[0]) is type(new_tree.body[0])
+                            and old_tree.body[0].name == new_tree.body[0].name):
+                        matches = [node for node in ast.parse(content).body
+                                   if isinstance(node, type(old_tree.body[0]))
+                                   and node.name == old_tree.body[0].name]
+                        if len(matches) == 1:
+                            command = dict(command, old=_source_of(content, matches[0]).rstrip("\n"))
+                            count = content.count(command["old"])
+                except (SyntaxError, ValueError):
+                    pass
             if count != 1:
                 state["last_error"] = (
                     f"фрагмент SEARCH для {path} встречается в текущем файле {count} раз; "
@@ -427,6 +448,14 @@ def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
     code = max(blocks, key=len)
 
     if observation.get("kind") == "tests":
+        # Сохраняем завершённые тесты даже при обрыве последнего на лимите.
+        if not _compiles(code):
+            lines = code.splitlines(keepends=True)
+            for end in range(len(lines) - 1, 0, -1):
+                prefix = "".join(lines[:end])
+                if _compiles(prefix) and _test_count(prefix):
+                    code = prefix
+                    break
         path = observation.get("tests_path") or ""
         if not path:
             return []
@@ -530,6 +559,14 @@ def drop_failing_tests(source: str, names: list[str]) -> str | None:
     if not doomed:
         return source
     lines = source.splitlines(keepends=True)
+    # После удаления последнего метода класс должен остаться валидным.
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.body:
+            if all(child.lineno in doomed for child in node.body):
+                first = node.body[0].lineno
+                indent = lines[first - 1][:len(lines[first - 1]) - len(lines[first - 1].lstrip())]
+                lines[first - 1] = indent + "pass\n"
+                doomed.discard(first)
     return "".join(line for number, line in enumerate(lines, 1) if number not in doomed)
 
 
@@ -549,7 +586,9 @@ SYSTEM_TESTS = (
     "неизменность аргументов, порядок. В каждом тесте есть assert с конкретным ожидаемым "
     "значением; заглушки и проверки вида assert callable(...) бесполезны. Тест обязан "
     "проходить на этом модуле. Не копируй код модуля. Не используй pytest, parametrize и "
-    "фикстуры. Ответь одним блоком ```python```: не меньше 6 и не больше 12 тестов, до 70 строк."
+    "фикстуры. Бюджет ответа 1024 токена: пиши компактные функции test_* с обычным assert, "
+    "без классов и длинных имён. Ответь одним блоком ```python```: 5–8 тестов, до 45 строк. "
+    "Проверяй границы до/ровно/после, разные порядки входа и сохранность аргументов."
 )
 
 
@@ -623,7 +662,7 @@ def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
             )
         else:
             parts.append(
-                f"Напиши тесты в {tests_path}: не больше 12 тестов и 70 строк, каждый "
+                f"Напиши тесты в {tests_path}: 5–8 коротких тестов и до 45 строк, каждый "
                 "проверяет одно правило из документации. Оформляй их как unittest.TestCase "
                 "с методами test_* или как функции test_* верхнего уровня. Тесты обязаны "
                 "проходить на прочитанном модуле и не повторять его код. Ответь одним "
