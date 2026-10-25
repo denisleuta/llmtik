@@ -159,6 +159,50 @@ class Todo6BuildPrompt(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_submit_restores_last_passing_tests(self):
+        path = TESTS_OBS["tests_path"]
+        good = "def test_good():\n    assert True\n"
+        broken = good + "def test_bad():\n    assert False\n"
+        task = agent._new_state(TESTS_OBS)
+        task.update(files={path: broken}, original={path: "# initial\n"},
+                    backup=good, passing=False)
+        command = agent._submit(TESTS_OBS, task)
+        self.assertEqual(command["content"], good)
+        self.assertEqual(agent._decide(TESTS_OBS, task), {"cmd": "submit"})
+
+    def test_all_failures_survive_report_truncation(self):
+        text = "прошло 0 из 2\nFAIL test_first\n" + "x" * 3000 + "\nFAIL test_last\n"
+        obs = dict(TESTS_OBS, last={"cmd": "run", "ok": True, "output": text})
+        task = agent._new_state(obs)
+        agent._absorb(obs, task)
+        self.assertLessEqual(len(task["report"]), agent.REPORT_LIMIT)
+        self.assertEqual(task["report_info"]["failing"], ["test_first", "test_last"])
+
+    def test_new_tests_are_unverified_until_run(self):
+        path = TESTS_OBS["tests_path"]
+        task = agent._new_state(TESTS_OBS)
+        task.update(files={"journal.py": "", path: "def test_a():\n    assert True\n"},
+                    passing=True, stage="ask")
+        with mock.patch.object(agent, "ask", return_value="```python\ndef test_b():\n    assert 2 == 2\n```" ):
+            command = agent._decide(TESTS_OBS, task)
+        self.assertEqual(command["cmd"], "write")
+        self.assertFalse(task["passing"])
+
+    def test_failed_review_restores_all_changed_modules(self):
+        task = agent._new_state(FIX_OBS)
+        task.update(files={"stock.py": "bad = 1\n", "units.py": "bad = 2\n",
+                           "tests/test_stock.py": ""}, stage="judge", reviewed=True,
+                    review_rounds=1, backup="good = 1\n",
+                    backup_files=agent.base64.b64encode(agent.zlib.compress(agent.json.dumps(
+                        {"stock.py": "good = 1\n", "units.py": "good = 2\n"}
+                    ).encode())).decode(),
+                    report="прошло 0 из 1\nFAIL test_regression\n")
+        first = agent._decide(FIX_OBS, task)
+        second = agent._decide(FIX_OBS, task)
+        self.assertEqual({first["path"], second["path"]}, {"stock.py", "units.py"})
+        self.assertIn("good", first["content"])
+        self.assertIn("good", second["content"])
+
     def test_truncated_reply_keeps_completed_tests(self):
         reply = "```python\ndef test_ok():\n    assert 1 == 1\n\ndef test_cut():\n    assert (\n"
         commands = agent.extract_commands(reply, TESTS_OBS, state())
@@ -189,6 +233,133 @@ class RecoveryTests(unittest.TestCase):
         commands = agent.extract_commands(reply, FIX_OBS,
                                          state(files={"stock.py": "def f():\n    return 1\n"}))
         self.assertEqual(commands, [])
+
+
+class GeneralizationTests(unittest.TestCase):
+    def test_multimodule_task_gets_a_plan_before_editing(self):
+        task = agent._new_state(FIX_OBS)
+        task["files"] = {"stock.py": "from units import kg\n", "units.py": "kg = 1\n",
+                         "tests/test_stock.py": ""}
+        reply = "FILE: units.py\n<<<<<<< SEARCH\nkg = 1\n=======\nkg = 2\n>>>>>>> REPLACE"
+        with mock.patch.object(agent, "ask", side_effect=["Причина в units.py; сохранить API.", reply]) as ask:
+            command = agent._decide(FIX_OBS, task)
+        self.assertEqual(ask.call_count, 2)
+        self.assertIn("Причина в units.py", ask.call_args_list[1].args[1])
+        self.assertEqual(command["path"], "units.py")
+        self.assertEqual(task["attempts"], 2)
+
+    def test_multiple_edits_keep_the_helpers_file_path(self):
+        reply = ("FILE: units.py\n<<<<<<< SEARCH\na = 1\n=======\na = 3\n>>>>>>> REPLACE\n"
+                 "<<<<<<< SEARCH\nb = 2\n=======\nb = 4\n>>>>>>> REPLACE")
+        commands = agent.extract_commands(reply, FIX_OBS,
+                                         state(files={"units.py": "a = 1\nb = 2\n"}))
+        self.assertEqual([command["path"] for command in commands], ["units.py", "units.py"])
+
+    def test_function_reply_preserves_the_rest_of_the_module(self):
+        original = "OFFSET = 7\ndef f(x):\n    return x - OFFSET\ndef keep():\n    return OFFSET\n"
+        reply = "```python\ndef f(x):\n    return x + OFFSET\n```"
+        commands = agent.extract_commands(reply, FIX_OBS, state(files={"stock.py": original}))
+        namespace = {}
+        exec(commands[0]["content"], namespace)
+        self.assertEqual(namespace["f"](2), 9)
+        self.assertEqual(namespace["keep"](), 7)
+
+    def test_partial_module_can_add_imports_after_future(self):
+        original = '"""doc"""\nfrom __future__ import annotations\ndef f(x):\n    return x\ndef keep():\n    return 9\n'
+        proposed = "from decimal import Decimal\ndef f(x):\n    return Decimal(x)\n"
+        merged = agent._preserve_module(original, proposed)
+        namespace = {}
+        exec(merged, namespace)
+        self.assertEqual(str(namespace["f"]("1.25")), "1.25")
+        self.assertEqual(namespace["keep"](), 9)
+
+    def test_protected_tests_cannot_be_changed_by_reply(self):
+        reply = "FILE: tests/../tests/test_stock.py\n<<<<<<< SEARCH\nassert False\n=======\nassert True\n>>>>>>> REPLACE"
+        commands = agent.extract_commands(reply, FIX_OBS, state())
+        self.assertEqual(commands, [])
+
+    def test_tests_task_cannot_change_the_target(self):
+        reply = "FILE: journal.py\n<<<<<<< SEARCH\nraise ValueError()\n=======\npass\n>>>>>>> REPLACE"
+        self.assertEqual(agent.extract_commands(reply, TESTS_OBS, state()), [])
+
+    def test_failed_method_does_not_delete_other_class_method(self):
+        source = "class A:\n    def test_same(self):\n        assert False\nclass B:\n    def test_same(self):\n        assert True\n"
+        result = agent.drop_failing_tests(source, ["A.test_same"])
+        namespace = {}
+        exec(result, namespace)
+        self.assertFalse(hasattr(namespace["A"], "test_same"))
+        self.assertTrue(hasattr(namespace["B"], "test_same"))
+
+    def test_conflicting_helper_is_not_silently_reused(self):
+        old = "def make():\n    return 1\ndef test_old():\n    assert make() == 1\n"
+        new = "def make():\n    return 2\ndef test_new():\n    assert make() == 2\n"
+        self.assertIsNone(agent._merge_tests(old, new))
+        addition = new.replace("make", "r2_make")
+        merged = agent._merge_tests(old, addition)
+        namespace = {}
+        exec(merged, namespace)
+        namespace["test_old"]()
+        namespace["test_new"]()
+
+    def test_conflicting_constant_does_not_break_old_tests(self):
+        old = "VALUE = 1\ndef test_a():\n    assert VALUE == 1\n"
+        new = "VALUE = 2\ndef test_b():\n    assert VALUE == 2\n"
+        self.assertIsNone(agent._merge_tests(old, new))
+
+    def test_rejected_addition_can_be_retried_without_losing_backup(self):
+        path = TESTS_OBS["tests_path"]
+        original = "def make():\n    return 1\ndef test_old():\n    assert make() == 1\n"
+        conflict = "```python\ndef make():\n    return 2\ndef test_new():\n    assert make() == 2\n```"
+        task = agent._new_state(TESTS_OBS)
+        task.update(files={"journal.py": "", path: original}, backup=original,
+                    passing=True, stage="ask")
+        with mock.patch.object(agent, "ask", return_value=conflict):
+            self.assertEqual(agent._decide(TESTS_OBS, task)["cmd"], "run")
+        obs = dict(TESTS_OBS, last={"cmd": "run", "ok": True, "output": "прошло 1 из 1"})
+        agent._absorb(obs, task)
+        with mock.patch.object(agent, "ask", return_value=conflict.replace("make", "r2_make")) as ask:
+            command = agent._decide(obs, task)
+        ask.assert_called_once()
+        self.assertEqual(command["cmd"], "write")
+        self.assertIn("r2_make", command["content"])
+        self.assertEqual(task["backup"], original)
+
+    def test_package_initializers_are_read(self):
+        obs = dict(FIX_OBS, target="pkg/api.py", visible_tests=[], files=[
+            {"path": path, "bytes": 10} for path in
+            ("pkg/api.py", "pkg/nested/core.py", "pkg/__init__.py", "pkg/nested/__init__.py")])
+        reads = agent.choose_reads(obs, state(files={"pkg/api.py": "from pkg.nested.core import f\n"}))
+        self.assertIn("pkg/__init__.py", reads)
+        self.assertIn("pkg/nested/__init__.py", reads)
+        self.assertIn("pkg/nested/core.py", reads)
+
+    def test_timeout_failure_is_identified(self):
+        report = agent.parse_report("прошло 0 из 1\nTIMEOUT T.test_large\n")
+        self.assertEqual(report["failing_full"], ["T.test_large"])
+
+    def test_memory_can_reload_large_source_without_truncation(self):
+        import json
+        memory = {}
+        source = "# длинный исходник\n" * 1400
+        obs = dict(FIX_OBS, last={"cmd": "read", "ok": True, "path": "stock.py", "output": source})
+        command = agent.act(obs, memory)
+        self.assertEqual(command["path"], "tests/test_stock.py")
+        self.assertLess(len(json.dumps(memory, ensure_ascii=False).encode()), 65536)
+        self.assertIn("packed", memory["task"])
+        memory = json.loads(json.dumps(memory))
+        obs = dict(FIX_OBS, last={"cmd": "read", "ok": True,
+                                 "path": "tests/test_stock.py", "output": ""})
+        with mock.patch.object(agent, "ask", return_value=None):
+            agent.act(obs, memory)
+        restored = agent.json.loads(agent.zlib.decompress(agent.base64.b64decode(memory["task"]["packed"])))
+        self.assertEqual(restored["files"]["stock.py"], source)
+
+    def test_incomplete_read_allows_edit_but_forbids_overwrite(self):
+        task = state(files={"stock.py": "value = 1\ndef unfinished(\n"}, truncated=["stock.py"])
+        edit = agent._checked([{"cmd": "edit", "path": "stock.py", "old": "value = 1", "new": "value = 2"}], task)
+        self.assertEqual(len(edit), 1)
+        write = agent._checked([{"cmd": "write", "path": "stock.py", "content": "value = 2\n"}], task)
+        self.assertEqual(write, [])
 
 
 class OfflineRun(unittest.TestCase):

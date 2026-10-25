@@ -20,20 +20,24 @@
 from __future__ import annotations
 
 import ast
+import base64
 import difflib
+import json
 import os
+import posixpath
 import re
 import sys
 import time
+import zlib
 
 PUBLIC_POLYGON_URL = "https://lectures.ai.dscs.pro"
 MODEL = "deepseek-flash"
-FILE_LIMIT = 12000
+FILE_LIMIT = 20000
 REPORT_LIMIT = 2500
 DIFF_LIMIT = 2000
-MAX_ATTEMPTS = 6
-EXTRA_TEST_ROUNDS = 3
-MAX_TESTS = 20
+MAX_ATTEMPTS = 8
+EXTRA_TEST_ROUNDS = 4
+MAX_TESTS = 40
 
 
 # ------------------------------------------------------------- готово: модель
@@ -48,7 +52,7 @@ def ask(system: str, prompt: str, max_tokens: int = 1024) -> str | None:
         import anthropic
     except ImportError:
         return None
-    client = anthropic.Anthropic(api_key=token, base_url=url, timeout=90.0, max_retries=0)
+    client = anthropic.Anthropic(api_key=token, base_url=url, timeout=30.0, max_retries=0)
     for attempt in range(2):
         try:
             response = client.messages.create(
@@ -59,6 +63,10 @@ def ask(system: str, prompt: str, max_tokens: int = 1024) -> str | None:
         except anthropic.RateLimitError:
             if attempt == 0:
                 time.sleep(10)
+                continue
+            return None
+        except anthropic.APIConnectionError:
+            if attempt == 0:
                 continue
             return None
         except (anthropic.APIError, OSError, ValueError):
@@ -102,6 +110,10 @@ def _import_paths(path: str, source: str) -> list[str]:
         if base:
             stem = f"{base}/{stem}"
         if stem:
+            # Импорт пакета выполняет и родительские __init__.py.
+            parts = stem.split("/")
+            for size in range(1, len(parts)):
+                found.append("/".join(parts[:size]) + "/__init__.py")
             found.extend((stem + ".py", stem + "/__init__.py"))
 
     for node in ast.walk(tree):
@@ -177,7 +189,7 @@ def parse_report(text: str) -> dict:
     failing: list[str] = []
     failing_full: list[str] = []
     for line in text.splitlines():
-        match = re.match(r"^(?:FAIL|ERROR)\s+([A-Za-z_][\w.]*)", line.strip())
+        match = re.match(r"^(?:FAIL|ERROR|TIMEOUT)\s+([A-Za-z_][\w.]*)", line.strip())
         if match:
             full = match.group(1)
             name = full.split(".")[-1]
@@ -260,6 +272,19 @@ def _body_key(node) -> str:
     return ast.dump(ast.Module(body=node.body, type_ignores=[]), include_attributes=False)
 
 
+def _bound_names(node) -> set[str]:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return {alias.asname or (alias.name.split(".")[0] if isinstance(node, ast.Import)
+                                else alias.name) for alias in node.names}
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        return {part.id for target in targets for part in ast.walk(target)
+                if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)}
+    return set()
+
+
 def _merge_tests(existing: str, addition: str) -> str | None:
     """Дописать новые тесты к уже прошедшим, не теряя прежние.
 
@@ -274,8 +299,9 @@ def _merge_tests(existing: str, addition: str) -> str | None:
     except (SyntaxError, ValueError):
         return None
 
-    used = {node.name for node in old_tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    bindings = {name: ast.dump(node, include_attributes=False)
+                for node in old_tree.body for name in _bound_names(node)}
+    used = set(bindings)
     known = {_body_key(node) for node in ast.walk(old_tree)
              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
              and node.name.startswith("test")}
@@ -295,8 +321,11 @@ def _merge_tests(existing: str, addition: str) -> str | None:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             text = ast.unparse(node).strip()
             if text not in imports:
+                if _bound_names(node) & used:
+                    return None
                 imports.add(text)
                 added.append(text)
+                used.update(_bound_names(node))
             continue
         if isinstance(node, ast.ClassDef):
             methods = [child for child in node.body
@@ -329,6 +358,8 @@ def _merge_tests(existing: str, addition: str) -> str | None:
             name, text = node.name, _source_of(addition, node).rstrip()
             if name in used:
                 if not is_test:
+                    if ast.dump(node, include_attributes=False) != bindings.get(name):
+                        return None
                     continue
                 name = unique(name)
                 text = re.sub(rf"(async\s+def|def)\s+{re.escape(node.name)}\b",
@@ -339,9 +370,12 @@ def _merge_tests(existing: str, addition: str) -> str | None:
                 known.add(_body_key(node))
             added.append(text)
             continue
-        if isinstance(node, ast.Assign):
-            names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            names = _bound_names(node)
             if names & used:
+                if any(bindings.get(name) != ast.dump(node, include_attributes=False)
+                       for name in names & used):
+                    return None
                 continue
             used |= names
             added.append(_source_of(addition, node).rstrip())
@@ -403,7 +437,9 @@ def _checked(commands: list[dict], state: dict) -> list[dict]:
         else:
             kept.append(command)
             continue
-        if _compiles(updated):
+        if (command.get("cmd") == "write" and path in state.get("truncated", [])):
+            state["last_error"] = f"{path} прочитан не целиком: используй только точечные SEARCH/REPLACE"
+        elif _compiles(updated) or (command.get("cmd") == "edit" and path in state.get("truncated", [])):
             kept.append(command)
             shadow[path] = updated
         else:
@@ -412,6 +448,70 @@ def _checked(commands: list[dict], state: dict) -> list[dict]:
                 "верный Python, не обрывай блок"
             )
     return kept
+
+
+def _allowed_commands(commands: list[dict], observation: dict, state: dict) -> list[dict]:
+    protected = {posixpath.normpath(path) for path in observation.get("visible_tests", [])}
+    for command in commands:
+        path = command.get("path", "")
+        normalized = posixpath.normpath(path)
+        if (normalized.startswith(("/", "..")) or "\\" in path
+                or (observation.get("kind") == "tests"
+                    and normalized != observation.get("tests_path"))
+                or (observation.get("kind") != "tests" and normalized in protected)):
+            state["last_error"] = f"недопустимая правка {path}: меняй только код задачи, не защищённые тесты"
+            return []
+        command["path"] = normalized
+    return _checked(commands, state)
+
+
+def _preserve_module(existing: str, proposed: str) -> str | None:
+    """Ответ с отдельными функциями не должен стирать остальной API модуля."""
+    if not existing or not (_top_names(existing) - _top_names(proposed)):
+        return proposed
+    try:
+        before, after = ast.parse(existing), ast.parse(proposed)
+    except (SyntaxError, ValueError):
+        return None
+    definitions = {node.name: node for node in before.body
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    function_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    if not after.body or any(not isinstance(node, function_types + (ast.Import, ast.ImportFrom))
+                             for node in after.body):
+        return None
+    replacements, additions = [], []
+    old_imports = {ast.dump(node, include_attributes=False) for node in before.body
+                   if isinstance(node, (ast.Import, ast.ImportFrom))}
+    for node in after.body:
+        text = _source_of(proposed, node).rstrip("\n") + "\n"
+        if isinstance(node, function_types) and node.name in definitions:
+            old = definitions[node.name]
+            replacements.append((min([old.lineno] + [d.lineno for d in old.decorator_list]),
+                                 old.end_lineno, text))
+        elif isinstance(node, function_types):
+            # Порядок новых классов, декораторов и старых импортов неоднозначен.
+            return None
+        elif ast.dump(node, include_attributes=False) not in old_imports:
+            # Новые импорты нужны до декораторов и значений по умолчанию.
+            additions.insert(0, text)
+    lines = existing.splitlines(keepends=True)
+    for start, end, text in sorted(replacements, reverse=True):
+        lines[start - 1:end] = [text]
+    if additions:
+        tree = ast.parse("".join(lines))
+        at = 0
+        for node in tree.body:
+            if (isinstance(node, ast.ImportFrom) and node.module == "__future__") or (
+                    node is tree.body[0] and isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                at = node.end_lineno
+            else:
+                break
+        # После замен список строк пересобирается: номера AST снова построчные.
+        lines = "".join(lines).splitlines(keepends=True)
+        lines[at:at] = ["\n" + "\n".join(additions) + "\n"]
+    result = "".join(lines)
+    return result if _compiles(result) else None
 
 
 def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
@@ -426,17 +526,19 @@ def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
 
     target = observation.get("target") or ""
     commands: list[dict] = []
+    current_path = target
     for match in BLOCK.finditer(reply):
         old = match.group("old")
         if not old:
             continue
-        path = (match.group("path") or "").strip() or target
+        path = (match.group("path") or "").strip().strip("`") or current_path
+        current_path = path
         if not path:
             continue
         commands.append({"cmd": "edit", "path": path,
                          "old": old, "new": match.group("new")})
     if commands:
-        return _checked(commands, state)
+        return _allowed_commands(commands, observation, state)
 
     blocks = CODE.findall(reply)
     if not blocks:
@@ -467,7 +569,8 @@ def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
         merged = _merge_tests(existing, code)
         if merged is None:
             state["last_error"] = (
-                "прошлый файл тестов не разобрать; верни полный синтаксически верный файл"
+                "дополнение тестов конфликтует с существующими импортами или помощниками; "
+                "используй новые уникальные имена помощников и констант, прежние не меняй"
             )
             return []
         if merged == existing:
@@ -479,7 +582,11 @@ def extract_commands(reply: str, observation: dict, state: dict) -> list[dict]:
         return _checked([{"cmd": "write", "path": path, "content": merged}], state)
     if not target:
         return []
-    return _checked([{"cmd": "write", "path": target, "content": code}], state)
+    code = _preserve_module((state.get("files") or {}).get(target, ""), code)
+    if code is None:
+        state["last_error"] = "ответ стирает функции исходного модуля; верни точечные SEARCH/REPLACE"
+        return []
+    return _allowed_commands([{"cmd": "write", "path": target, "content": code}], observation, state)
 
 
 # ----------------------------------------------------- 4. когда сдавать задачу
@@ -528,11 +635,12 @@ def drop_failing_tests(source: str, names: list[str]) -> str | None:
         return None
 
     wanted = set(names)
+    classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
     bare: set[str] = set()
     exact: set[str] = set()
     for name in wanted:
         parts = name.split(".")
-        if len(parts) >= 3:
+        if len(parts) >= 3 or (len(parts) == 2 and parts[-2] in classes):
             # module.Class.method: убираем только этот метод, а не одноимённые
             # методы в других классах.
             exact.add(".".join(parts[-2:]))
@@ -578,7 +686,9 @@ SYSTEM_EDIT = (
     "новый фрагмент\n>>>>>>> REPLACE\n"
     "SEARCH копирует строки файла дословно и встречается в файле один раз. Не меняй тесты. "
     "Выполни все правила из условия, включая ошибки ввода и краевые случаи; не меняй поведение, "
-    "о котором условие молчит."
+    "о котором условие молчит. Бюджет ответа 1024 токена: выбирай короткие точные правки, "
+    "не переписывай целый большой файл. В implement реализуй весь контракт, а не только "
+    "примеры. Если не помещается всё, заверши текущий блок; продолжишь следующим ответом."
 )
 SYSTEM_TESTS = (
     "Ты пишешь тесты Python (unittest или функции test_*) к правильному модулю. Каждый тест "
@@ -647,8 +757,33 @@ def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
     if last_error:
         parts.append("Замечание к прошлому ответу:\n" + str(last_error))
 
+    if state.get("planning"):
+        return (
+            "Разбери задачу Python перед правкой. Код не пиши. Не больше 6 коротких пунктов: "
+            "путь данных через модули и место причины, полный контракт нужной функции, "
+            "границы и ошибки ввода, какое прежнее поведение обязано сохраниться, "
+            "минимальные места правки. Опирайся только на условие и показанные файлы.",
+            "\n\n".join(parts),
+        )
+    if state.get("plan"):
+        parts.append("Предварительный разбор (перепроверь каждый вывод по условию):\n" + state["plan"])
+
     if kind == "tests":
         tests_path = observation.get("tests_path")
+        focus = [
+            "основные сценарии всех публичных функций и точные результаты",
+            "границы: до, ровно на и после порога; пустые и единичные входы",
+            "документированные ошибки и типы ввода; отсутствие изменений аргументов",
+            "несколько последовательных вызовов, независимость объектов, порядок и равные ключи",
+            "сочетания условий и ветки, которые ещё не проверены существующими тестами",
+        ][min(state.get("extra", 0), 4)]
+        parts.append(
+            "Фокус этого раунда: " + focus + ". Не придумывай требований, которых нет в условии "
+            "или документации. Один короткий test_* может проверить таблицу конкретных пар "
+            "вход → ожидаемый результат; вычислять ожидания копией алгоритма нельзя. "
+            f"Новым помощникам и константам дай префикс r{state.get('attempts', 0)}_, "
+            "чтобы не затронуть предыдущие тесты."
+        )
         if report.startswith("прошло 0 из 0") or "ошибка импорта" in report:
             parts.append(
                 "Прошлый файл тестов не запустился. Верни его целиком заново, начиная с "
@@ -678,6 +813,15 @@ def build_prompt(observation: dict, state: dict) -> tuple[str, str]:
             "минимальную правку в формате SEARCH/REPLACE. Если всё уже верно, ответь "
             "одним словом ГОТОВО, без блока кода."
         )
+        if state.get("review_rounds", 0) >= 2:
+            parts.append(
+                "Независимая проверка на контрпримерах: мысленно выполни код на каждом "
+                "граничном значении из условия. Для fix отдельно сравни с исходным "
+                "поведением: значения по умолчанию, порядок при равенстве, изменение "
+                "аргументов и типы исключений. Не добавляй ограничения, которых нет "
+                "в контракте. Для проекта из нескольких модулей проследи весь путь "
+                "данных до места вычисления, а не только внешний вызов."
+            )
     else:
         parts.append(
             f"Исправь ошибку в {observation.get('target')} блоками FILE + SEARCH/REPLACE. "
@@ -705,7 +849,11 @@ def _absorb(observation: dict, state: dict) -> None:
     """Учесть результат прошлой команды."""
     last = observation["last"]
     if last["cmd"] == "read" and last.get("ok"):
-        text = last["output"][:FILE_LIMIT]
+        text, marker, _ = last["output"].partition("\n… обрезано, всего ")
+        if marker:
+            truncated = state.setdefault("truncated", [])
+            if last["path"] not in truncated:
+                truncated.append(last["path"])
         state["files"][last["path"]] = text
         original = state.setdefault("original", {})
         original.setdefault(last["path"], text)
@@ -714,6 +862,7 @@ def _absorb(observation: dict, state: dict) -> None:
         state["files"].pop(last.get("path"), None)        # перечитать перед следующей попыткой
         state["queue"] = []
     elif last["cmd"] == "run":
+        state["report_info"] = parse_report(last["output"])
         state["report"] = last["output"][:REPORT_LIMIT]
         state["stage"] = "judge"
 
@@ -725,9 +874,9 @@ def _issue(state: dict) -> dict:
     if command["cmd"] == "edit" and path in files:
         files[path] = files[path].replace(command["old"], command["new"], 1)
     elif command["cmd"] == "write":
-        files[path] = command["content"][:FILE_LIMIT]
+        files[path] = command["content"]
     elif command["cmd"] == "append":
-        files[path] = (files.get(path, "") + command["content"])[:FILE_LIMIT]
+        files[path] = files.get(path, "") + command["content"]
     state["stage"] = "applied" if not state["queue"] else "apply"
     return command
 
@@ -744,7 +893,7 @@ def _submit(observation: dict, state: dict) -> dict:
         path = observation.get("tests_path") or ""
         current = (state.get("files") or {}).get(path)
         if path and current is not None and not state.get("passing"):
-            original = (state.get("original") or {}).get(path)
+            original = state.get("backup") or (state.get("original") or {}).get(path)
             if original is not None and current != original:
                 state["submit_next"] = True
                 state["queue"] = [{"cmd": "write", "path": path, "content": original}]
@@ -765,10 +914,12 @@ def _decide(observation: dict, state: dict) -> dict:
         state["stage"] = "running"
         return {"cmd": "run"}
     if state["stage"] == "judge":
-        report = parse_report(state["report"])
+        report = state.pop("report_info", None) or parse_report(state["report"])
         kind = observation["kind"]
         target = observation.get("target") or ""
-        ok = report["ran"] > 0 and report["passed"] == report["ran"] and not state["notes"]
+        suite_passed = (report["ran"] > 0 and report["passed"] == report["ran"]
+                        and not report["import_errors"])
+        ok = suite_passed and not state["notes"]
         stub = (kind == "implement" and target
                 and _has_stub(state["files"].get(target, "")))
         if stub:
@@ -784,11 +935,11 @@ def _decide(observation: dict, state: dict) -> dict:
         review_now = False
         if kind == "tests":
             tests_path = observation["tests_path"]
-            if ok and not state["passing"]:
+            if suite_passed and not state["passing"]:
                 state["passing"], state["backup"] = True, state["files"].get(tests_path)
-            elif ok:
+            elif suite_passed:
                 state["backup"] = state["files"].get(tests_path)
-            if not ok:
+            if not suite_passed:
                 names = report.get("failing_full") or report["failing"]
                 if names and tests_path in state["files"] and state["dropped"] < 4:
                     trimmed = drop_failing_tests(state["files"][tests_path], names)
@@ -801,20 +952,33 @@ def _decide(observation: dict, state: dict) -> dict:
                     state["notes"] = []
                     state["queue"] = [{"cmd": "write", "path": tests_path, "content": state.pop("backup")}]
                     return _issue(state)
-        elif ok and not state.get("reviewed"):
+        elif ok and state.get("review_rounds", 0) < 2:
             # Видимые тесты прошли, но скрытые строже: один проход проверки по условию.
             state["reviewed"] = True
+            state["review_rounds"] = state.get("review_rounds", 0) + 1
             state["review"] = True
             state["backup"] = state["files"].get(observation.get("target"))
+            # Полная копия исходников не должна съедать лимит JSON-памяти.
+            state["backup_files"] = base64.b64encode(zlib.compress(
+                json.dumps(state["files"], ensure_ascii=False).encode("utf-8")
+            )).decode("ascii")
             review_now = True
         if not ok and not review_now and not stub and kind != "tests" \
-                and state.get("reviewed") and state.get("backup") and target:
+                and state.get("reviewed") and state.get("backup") and target \
+                and (report["passed"] != report["ran"] or report["import_errors"]):
             # Проверка всё сломала: возвращаем прошедшую видимые тесты версию.
             state["notes"] = []
-            state["queue"] = [{"cmd": "write", "path": target,
-                               "content": state.pop("backup")}]
+            saved = state.pop("backup_files", None) or {target: state["backup"]}
+            if isinstance(saved, str):
+                saved = json.loads(zlib.decompress(base64.b64decode(saved)))
+            state["queue"] = [
+                ({"cmd": "edit", "path": path, "old": state["files"][path], "new": content}
+                 if path in state.get("truncated", []) and path in state["files"]
+                 else {"cmd": "write", "path": path, "content": content})
+                for path, content in saved.items() if state["files"].get(path) != content]
             state["review"] = False
-            return _issue(state)
+            if state["queue"]:
+                return _issue(state)
         if not review_now and should_submit(observation, state, report):
             return _submit(observation, state)
         if ok and kind == "tests":
@@ -823,23 +987,46 @@ def _decide(observation: dict, state: dict) -> dict:
     if state["attempts"] >= MAX_ATTEMPTS or observation.get("calls_left", 1) <= 0 \
             or observation["steps_left"] <= 3:
         return _submit(observation, state)
+    protected = set(observation.get("visible_tests", [])) | {observation.get("tests_path", "")}
+    source_paths = [path for path in state["files"] if path.endswith(".py") and path not in protected]
+    if (observation.get("kind") != "tests" and not state["attempts"]
+            and len(source_paths) > 1 and observation.get("calls_left", 0) >= 4):
+        state["planning"] = True
+        system, prompt = build_prompt(observation, state)
+        state["planning"] = False
+        plan = ask(system, prompt, max_tokens=512)
+        state["attempts"] += 1
+        if isinstance(plan, str) and "<<<<<<<" not in plan:
+            state["plan"] = plan[:2500]
     state["attempts"] += 1
     system, prompt = build_prompt(observation, state)
     commands = extract_commands(ask(system, prompt), observation, state)
     state["notes"], state["report"] = [], ""
+    if state.get("last_error"):
+        state["notes"].append(state["last_error"])
     if not commands:
-        if state.get("review"):
+        if state.get("review") and not state.get("last_error"):
             state["review"] = False
+            if (state.get("review_rounds", 0) < 2
+                    and observation.get("calls_left", 0) > 1
+                    and observation.get("steps_left", 0) > 4):
+                return {"cmd": "run"}
             return _submit(observation, state)
         state["notes"].append("модель не вернула правку, которую можно разобрать")
         return {"cmd": "run"}
     state["review"] = False
     state["queue"] = commands
+    if observation.get("kind") == "tests":
+        # Проходила предыдущая версия; результат новых тестов ещё неизвестен.
+        state["passing"] = False
     return _issue(state)
 
 
 def act(observation, memory):
     state = memory.get("task")
+    if state and "packed" in state:
+        state = json.loads(zlib.decompress(base64.b64decode(state["packed"])))
+        memory["task"] = state
     if not state or state.get("id") != observation["task_id"]:
         state = memory["task"] = _new_state(observation)
     _absorb(observation, state)
@@ -849,6 +1036,11 @@ def act(observation, memory):
         # Пока функции не написаны, задача сдаётся как есть и получает ноль баллов.
         print(f"не готово: {todo}", file=sys.stderr)
         return {"cmd": "submit"}
+    finally:
+        serialized = json.dumps(state, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        if len(serialized) > 45000:
+            memory["task"] = {"id": state["id"], "packed": base64.b64encode(
+                zlib.compress(serialized)).decode("ascii")}
 
 
 if __name__ == "__main__":
