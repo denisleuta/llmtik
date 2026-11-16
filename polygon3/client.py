@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
+from http.client import HTTPSConnection
+from io import BytesIO
 import json
 import os
 from pathlib import Path
+import ssl
 import sys
 import time
 from urllib import error, request
@@ -19,6 +23,7 @@ from .engine.checks import evaluate_plan
 from .runtime.team_runtime import run_team_episode
 
 ROOT = Path(__file__).resolve().parent
+COURSE_URL = 'https://lectures.ai.dscs.pro'
 
 
 class _NoRedirect(request.HTTPRedirectHandler):
@@ -27,8 +32,105 @@ class _NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
+class _ConnectTimeout(TimeoutError):
+    """Тайм-аут до передачи HTTP-запроса, включая TLS-рукопожатие."""
+
+
+class _UploadHTTPSConnection(HTTPSConnection):
+    def connect(self):
+        timeout = self.timeout
+        self.timeout = min(timeout, 8)
+        try:
+            super().connect()
+        except TimeoutError:
+            self.close()
+            raise _ConnectTimeout() from None
+        finally:
+            self.timeout = timeout
+        self.sock.settimeout(timeout)
+
+
+class _UploadHTTPSHandler(request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_UploadHTTPSConnection, req, context=ssl.create_default_context())
+
+
 def _open(req, timeout):
     return request.build_opener(_NoRedirect()).open(req, timeout=timeout)
+
+
+def _open_upload_stdlib(req):
+    opener = request.build_opener(_NoRedirect(), _UploadHTTPSHandler())
+    for attempt in range(3):
+        try:
+            return opener.open(req, timeout=30)
+        except error.URLError as exc:
+            if not isinstance(exc.reason, _ConnectTimeout):
+                raise
+            if attempt == 2:
+                raise exc.reason from None
+            time.sleep(attempt + 1)
+
+
+class _UploadPreflightError(OSError):
+    """Публичная проверка не прошла; запрос с файлом ещё не делался."""
+
+
+def _preflight(session, requests, options):
+    for attempt in range(4):
+        try:
+            # Читаем ответ до конца, чтобы соединение вернулось в пул.
+            with session.get(COURSE_URL + '/leaderboard?challenge=c8', timeout=(8, 12), **options) as response:
+                if response.status_code == 200:
+                    return
+                if response.status_code < 500:
+                    raise _UploadPreflightError(f'Публичная таблица вернула HTTP {response.status_code}; файл не отправлен.')
+        except requests.exceptions.SSLError as exc:
+            if 'CERTIFICATE_VERIFY_FAILED' in str(exc):
+                raise _UploadPreflightError('Python не доверяет сертификату сервера; проверьте SSL_CERT_FILE. Файл не отправлен.') from None
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            pass
+        if attempt < 3:
+            time.sleep(attempt + 1)
+    raise _UploadPreflightError('Стенд не ответил на проверку соединения; файл не отправлен.')
+
+
+def _read_response(response, limit):
+    body = bytearray()
+    for chunk in response.iter_content(chunk_size=min(limit, 8192)):
+        body.extend(chunk[:limit - len(body)])
+        if len(body) == limit:
+            break
+    return BytesIO(body)
+
+
+@contextmanager
+def _open_upload(req):
+    if req.full_url != COURSE_URL + '/submit':
+        with _open_upload_stdlib(req) as response:
+            yield response
+        return
+    try:
+        import requests
+    except ImportError:
+        with _open_upload_stdlib(req) as response:
+            yield response
+        return
+    options = {'verify': os.environ.get('SSL_CERT_FILE') or os.environ.get('SSL_CERT_DIR') or True,
+               'allow_redirects': False}
+    with requests.Session() as session:
+        session.auth = lambda prepared: prepared  # Не берём авторизацию из .netrc.
+        _preflight(session, requests, options)
+        # Только один POST. Тайм-аут ответа не говорит, принял ли сервер файл.
+        try:
+            with session.post(req.full_url, data=req.data, headers=dict(req.header_items()),
+                              timeout=(8, 30), stream=True, **options) as response:
+                if not 200 <= response.status_code < 300:
+                    raise error.HTTPError(req.full_url, response.status_code, 'upload', response.headers,
+                                          _read_response(response, 4097))
+                yield _read_response(response, 65537)
+        except requests.exceptions.RequestException as exc:
+            raise error.URLError(type(exc).__name__) from None
 
 
 def _setting(name):
@@ -100,7 +202,7 @@ class LiveTransport:
     calls_left может передать доверенный worker для точного учёта run_token.
     """
     def __init__(self, base_url=None, token=None, *, timeout=30, calls_left=None, before_http=None):
-        self.base_url = (base_url or _setting('POLYGON_URL') or 'https://lectures.ai.dscs.pro').rstrip('/')
+        self.base_url = (base_url or _setting('POLYGON_URL') or COURSE_URL).rstrip('/')
         address = urlsplit(self.base_url)
         if address.scheme not in ('http', 'https') or not address.hostname or address.username or address.password or address.query or address.fragment:
             raise ValueError('неподходящий адрес API')
@@ -377,7 +479,7 @@ def upload(agent, *, base_url=None, token=None):
                           headers={'Authorization': 'Bearer ' + settings._token,
                                    'Content-Type': 'multipart/form-data; boundary=' + boundary})
     try:
-        with _open(req, timeout=30) as response:
+        with _open_upload(req) as response:
             result = strict_json_loads(response.read(65537), limit=65536)
     except error.HTTPError as exc:
         detail = ''
@@ -387,6 +489,16 @@ def upload(agent, *, base_url=None, token=None):
             pass
         reason = detail if isinstance(detail, str) and detail else 'проверьте открытие тура, права и лимит отправок'
         raise ValueError(f'отправка отклонена HTTP {exc.code}: {reason}') from None
+    except _ConnectTimeout:
+        raise ValueError('Не удалось установить HTTPS после трёх попыток; файл не отправлен.') from None
+    except _UploadPreflightError as exc:
+        raise ValueError(str(exc)) from None
+    except error.URLError as exc:
+        if isinstance(exc.reason, ssl.SSLCertVerificationError):
+            raise ValueError('Python не доверяет сертификату сервера; проверьте SSL_CERT_FILE. Файл не отправлен.') from None
+        raise ValueError('Сетевая ошибка при отправке. Проверьте историю попыток перед повтором.') from None
+    except (OSError, ValueError):
+        raise ValueError('Нет подтверждения от сервера. Проверьте историю попыток перед повтором.') from None
     if not isinstance(result, dict) or type(result.get('job_id')) is not int:
         raise ValueError('сервер не подтвердил постановку в очередь')
     return result
@@ -477,7 +589,10 @@ def main(argv=None):
     elif args.command == 'upload':
         if not args.confirm:
             parser.error('upload требует --confirm; локальные прогоны ничего не отправляют')
-        result = upload(args.agent)
+        try:
+            result = upload(args.agent)
+        except (ValueError, OSError) as exc:
+            parser.exit(2, f'{exc}\n')
         print('Отправлено. Номер прогона:', result['job_id'])
     else:
         for path in sorted((ROOT / 'cases').glob('*.json')):
